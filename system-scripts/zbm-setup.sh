@@ -1,555 +1,328 @@
 #!/usr/bin/env bash
-# zbm-setup.sh v2.0 — Fixed kernel discovery for cloned BEs
-# Key fixes:
-# 1. Ensures /boot is always on the root dataset (not ESP)
-# 2. Configures ZBM to use a shared kernel from ESP
-# 3. Sets up dracut to find kernels properly
-
-usage() {
-  cat <<EOF
-Usage: sudo ESP_DEV=/dev/nvme0n1p1 $0
-   or:  sudo $0 /dev/nvme0n1p1
-
-Notes:
-- If the ESP is already mounted at /efi or /boot as vfat, the script will use that.
-- Otherwise you MUST specify the ESP device explicitly.
-EOF
-}
+# zbm-setup.sh v3.0 — Streamlined ZFSBootMenu setup for CachyOS/Arch
+# Optimized with simplified configuration and cleaner logic
 
 set -euo pipefail
 
-# ── TUNABLES (override by exporting before running) ──────────────────────────
+# Configuration defaults
 : "${POOL:=zpcachyos}"
 : "${BE_DATASET:=zpcachyos/ROOT/cos/root}"
 : "${KERNEL_BASENAME:=linux-cachyos}"
-: "${ESP_DEV:=}"                      # e.g. /dev/nvme0n1p1 (supply via args if empty)
+: "${ESP_DEV:=}"
 : "${USE_SYSTEMD_BOOT_FALLBACK:=true}"
 : "${PERSISTENT_ESP:=true}"
 : "${EFI_DIR:=/efi}"
 : "${ZBM_EFI_PATH:=/efi/EFI/ZBM}"
 : "${ZBM_TIMEOUT:=5}"
 : "${ZBM_KERNEL_CMDLINE:=rw quiet}"
-# ─────────────────────────────────────────────────────────────────────────────
 
+# Utility functions
 say() { printf "\033[1;32m[zbm-setup]\033[0m %s\n" "$*"; }
-warn(){ printf "\033[1;33m[zbm-setup]\033[0m %s\n" "$*"; }
+warn() { printf "\033[1;33m[zbm-setup]\033[0m %s\n" "$*"; }
 die() { printf "\033[1;31m[zbm-setup]\033[0m %s\n" "$*" >&2; exit 1; }
 
-require_root() { [[ $EUID -eq 0 ]] || die "Run as root (sudo)."; }
+usage() {
+    cat <<EOF
+Usage: sudo $0 /dev/nvme0n1p1
+   or: sudo ESP_DEV=/dev/nvme0n1p1 $0
+
+Configures ZFSBootMenu for your ZFS root system.
+The ESP device should be your EFI System Partition (e.g., /dev/nvme0n1p1).
+
+If the ESP is already mounted at /efi or /boot/efi, it will be auto-detected.
+EOF
+}
+
+require_root() {
+    [[ $EUID -eq 0 ]] || die "Run as root (sudo)"
+}
 
 ensure_rw_root() {
-  if ! touch /tmp/.zbm-rw-test.$$ 2>/dev/null; then
-    die "Root filesystem is read-only. Reboot via systemd-boot so / is RW, then rerun."
-  fi
-  rm -f /tmp/.zbm-rw-test.$$
+    if ! touch /tmp/.zbm-rw-test.$$ 2>/dev/null; then
+        die "Root filesystem is read-only. Reboot into RW mode first."
+    fi
+    rm -f /tmp/.zbm-rw-test.$$
 }
 
 install_required_packages() {
-  say "Installing required packages..."
+    say "Checking required packages..."
 
-  local packages=(
-    "zfsbootmenu"
-    "efibootmgr"
-    "dosfstools"
-  )
+    local packages=(zfsbootmenu efibootmgr dosfstools)
+    local missing=()
 
-  for pkg in "${packages[@]}"; do
-    if ! pacman -Q "$pkg" >/dev/null 2>&1; then
-      say "Installing $pkg..."
-      pacman -S --noconfirm "$pkg" || {
-        warn "Failed to install $pkg from official repos, trying AUR..."
-        if command -v yay >/dev/null; then
-          yay -S --noconfirm "$pkg"
-        else
-          die "Package $pkg not found and no AUR helper available"
-        fi
-      }
+    for pkg in "${packages[@]}"; do
+        pacman -Q "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        say "Installing: ${missing[*]}"
+        pacman -S --noconfirm "${missing[@]}" || {
+            warn "Some packages failed to install from repos"
+            command -v yay >/dev/null && yay -S --noconfirm "${missing[@]}"
+        }
+    else
+        say "✓ All required packages installed"
     fi
-  done
 }
 
 detect_esp() {
-  # Priority 1: CLI arg
-  if [[ $# -ge 1 && -n "${1:-}" ]]; then
-    ESP_DEV="$1"
-    say "ESP provided via argument: ${ESP_DEV}"
-    return 0
-  fi
-  # Priority 2: env var
-  if [[ -n "${ESP_DEV}" ]]; then
-    say "ESP provided via ENV: ${ESP_DEV}"
-    return 0
-  fi
-  # Priority 3: already-mounted vfat at /efi or /boot
-  for mp in /efi /boot; do
-    if findmnt -no FSTYPE "$mp" 2>/dev/null | grep -qx 'vfat'; then
-      ESP_DEV="$(findmnt -no SOURCE "$mp")"
-      say "Found mounted ESP at ${mp}: ${ESP_DEV}"
-      return 0
+    # Priority: CLI arg > env var > mounted ESP
+    ESP_DEV="${1:-${ESP_DEV:-}}"
+
+    if [[ -z "$ESP_DEV" ]]; then
+        for mp in /efi /boot/efi /boot; do
+            if findmnt -no FSTYPE "$mp" 2>/dev/null | grep -qx 'vfat'; then
+                ESP_DEV="$(findmnt -no SOURCE "$mp")"
+                say "Auto-detected ESP at $mp: $ESP_DEV"
+                break
+            fi
+        done
     fi
-  done
-  # Otherwise: bail
-  usage
-  die "No ESP specified and none mounted at /efi or /boot"
+
+    [[ -n "$ESP_DEV" ]] || { usage; die "No ESP device specified or detected"; }
+    [[ -b "$ESP_DEV" ]] || die "ESP device not found: $ESP_DEV"
+
+    say "Using ESP: $ESP_DEV"
 }
 
 ensure_dirs() {
-  mkdir -p "${EFI_DIR}" "${ZBM_EFI_PATH}"
-  mkdir -p /etc/zfsbootmenu/{dracut.conf.d,generate-zbm.pre.d,generate-zbm.post.d}
-  mkdir -p /etc/pacman.d/hooks /etc/zfs
+    mkdir -p "${EFI_DIR}" "${ZBM_EFI_PATH}"
+    mkdir -p /etc/zfsbootmenu/{dracut.conf.d,generate-zbm.pre.d,generate-zbm.post.d}
+    mkdir -p /etc/pacman.d/hooks /etc/zfs /var/log/zfsbootmenu
 }
 
-move_esp_to_efi_if_needed() {
-  local boot_fs
+setup_esp_mount() {
+    local boot_fs="$(findmnt -no FSTYPE /boot 2>/dev/null || true)"
 
-  if findmnt -no SOURCE /efi 2>/dev/null | grep -q "$ESP_DEV"; then
-    say "ESP already mounted at /efi, no move needed"
-    return 0
-  fi
-
-  boot_fs="$(findmnt -no FSTYPE /boot || true)"
-  if [[ "$boot_fs" == "vfat" ]]; then
-    say "ESP currently at /boot; moving it to ${EFI_DIR}…"
-    umount /boot || { warn "Forcing lazy unmount of /boot"; umount -l /boot; }
-    mount -t vfat "${ESP_DEV}" "${EFI_DIR}"
-  else
-    # Ensure ESP is mounted for initial writes
-    if ! mountpoint -q "${EFI_DIR}"; then
-      say "Temporarily mounting ESP at ${EFI_DIR}…"
-      mount -t vfat "${ESP_DEV}" "${EFI_DIR}"
+    # Move ESP from /boot to /efi if needed
+    if [[ "$boot_fs" == "vfat" ]]; then
+        say "Moving ESP from /boot to ${EFI_DIR}..."
+        umount /boot || umount -l /boot
+        mount -t vfat "${ESP_DEV}" "${EFI_DIR}"
+    elif ! mountpoint -q "${EFI_DIR}"; then
+        say "Mounting ESP at ${EFI_DIR}..."
+        mount -t vfat "${ESP_DEV}" "${EFI_DIR}"
     fi
-  fi
+
+    # Persist mount if requested
+    if [[ "${PERSISTENT_ESP}" == "true" ]]; then
+        local uuid="$(blkid -s UUID -o value "${ESP_DEV}")"
+        if ! grep -q "${uuid}.*${EFI_DIR}" /etc/fstab 2>/dev/null; then
+            say "Adding ESP to /etc/fstab..."
+            printf "UUID=%s  %s  vfat  umask=0077  0  2\n" "${uuid}" "${EFI_DIR}" >> /etc/fstab
+        fi
+    fi
 }
 
-maybe_persist_esp_mount() {
-  if [[ "${PERSISTENT_ESP}" == "true" ]]; then
-    say "Persisting ESP mount in /etc/fstab at ${EFI_DIR}…"
-    local uuid
-    uuid="$(blkid -s UUID -o value "${ESP_DEV}")"
-    grep -q "${uuid}.*${EFI_DIR}" /etc/fstab 2>/dev/null || \
-      printf "UUID=%s  %s  vfat  umask=0077  0  2\n" "${uuid}" "${EFI_DIR}" >> /etc/fstab
-  else
-    say "Not persisting ESP in fstab (ZBM mounts it on demand)."
-  fi
-}
+configure_zfs_datasets() {
+    say "Configuring ZFS dataset properties..."
 
-set_dataset_layout() {
-  say "Setting dataset mount policies..."
-  zfs set canmount=off    "${POOL}/ROOT"       || true
-  zfs set mountpoint=none "${POOL}/ROOT"       || true
-  zfs set canmount=off    "${POOL}/ROOT/cos"   || true
-  zfs set mountpoint=none "${POOL}/ROOT/cos"   || true
+    # Set container properties
+    zfs set canmount=off mountpoint=none "${POOL}/ROOT" 2>/dev/null || true
+    zfs set canmount=off mountpoint=none "${POOL}/ROOT/cos" 2>/dev/null || true
 
-  local current_mp
-  current_mp="$(zfs get -H -o value mountpoint "${BE_DATASET}" 2>/dev/null || echo "-")"
-  if [[ "${current_mp}" != "/" ]]; then
-    zfs set canmount=noauto "${BE_DATASET}"
-    zfs set mountpoint=/    "${BE_DATASET}" || warn "BE is live at /; mountpoint left unchanged."
-  else
-    zfs set canmount=noauto "${BE_DATASET}" || true
-    say "BE already mounted at /; leaving mountpoint as-is."
-  fi
-  zpool set bootfs="${BE_DATASET}" "${POOL}"
-}
-
-set_zbm_dataset_properties() {
-  say "Setting ZBM dataset properties..."
-
-  # Set root prefix on the BE root container
-  zfs set org.zfsbootmenu:rootprefix="root=ZFS=" "${POOL}/ROOT"
-
-  # Set command line on the specific boot environment
-  zfs set org.zfsbootmenu:commandline="${ZBM_KERNEL_CMDLINE}" "${BE_DATASET}"
-
-  # CRITICAL: Tell ZBM to look for kernels on ESP, not in each BE
-  # This allows cloned BEs to work without copying kernels
-  zfs set org.zfsbootmenu:kernelpath="/efi" "${POOL}/ROOT"
-
-  say "ZBM dataset properties configured"
-}
-
-ensure_kernel_files_in_boot() {
-  say "Ensuring kernel files are in /boot on root dataset..."
-
-  # Make sure /boot directory exists on the root dataset
-  mkdir -p /boot
-
-  local kernel_file="/boot/vmlinuz-${KERNEL_BASENAME}"
-  
-  if [[ ! -f "$kernel_file" ]]; then
-    say "Kernel files missing from /boot, installing..."
-    
-    # Copy from ESP if they exist there
-    if [[ -f "${EFI_DIR}/vmlinuz-${KERNEL_BASENAME}" ]]; then
-      say "Copying kernel files from ESP to /boot..."
-      cp "${EFI_DIR}/vmlinuz-${KERNEL_BASENAME}" /boot/
-      cp "${EFI_DIR}/initramfs-${KERNEL_BASENAME}"* /boot/ 2>/dev/null || true
-      [[ -f "${EFI_DIR}/amd-ucode.img" ]] && cp "${EFI_DIR}/amd-ucode.img" /boot/
-      [[ -f "${EFI_DIR}/intel-ucode.img" ]] && cp "${EFI_DIR}/intel-ucode.img" /boot/
+    # Configure boot environment
+    local current_mp="$(zfs get -H -o value mountpoint "${BE_DATASET}" 2>/dev/null || echo "-")"
+    if [[ "${current_mp}" != "/" ]]; then
+        zfs set canmount=noauto mountpoint=/ "${BE_DATASET}" || \
+            warn "Could not set mountpoint on live BE"
     else
-      # Reinstall kernel package to populate /boot
-      say "Installing kernel package: ${KERNEL_BASENAME}..."
-      pacman -S --noconfirm "${KERNEL_BASENAME}"
+        zfs set canmount=noauto "${BE_DATASET}" 2>/dev/null || true
     fi
-  fi
 
-  say "✓ Kernel files ready in /boot"
+    # Set boot filesystem
+    zpool set bootfs="${BE_DATASET}" "${POOL}"
+
+    # Set ZBM properties
+    zfs set org.zfsbootmenu:rootprefix="root=ZFS=" "${POOL}/ROOT"
+    zfs set org.zfsbootmenu:commandline="${ZBM_KERNEL_CMDLINE}" "${BE_DATASET}"
+
+    say "✓ Dataset properties configured"
 }
 
-ensure_mkinitcpio_has_zfs() {
-  say "Ensuring mkinitcpio HOOKS includes 'zfs' before 'filesystems'…"
-  local cfg=/etc/mkinitcpio.conf
-  [[ -w "$cfg" ]] || die "Cannot write ${cfg} (root may be RO)."
-  
-  if ! grep -Eq 'HOOKS=.*\bzfs\b' "$cfg"; then
-    sed -i -E 's/(HOOKS=.*) filesystems/\1 zfs filesystems/' "$cfg"
-  else
-    grep -Eq 'HOOKS=.*zfs.*filesystems' "$cfg" || \
-      sed -i -E 's/(HOOKS=.*) filesystems/\1 zfs filesystems/' "$cfg"
-  fi
+ensure_kernels() {
+    local target="${1:-/boot}"
+    local kernel_file="$target/vmlinuz-${KERNEL_BASENAME}"
 
-  say "Ensuring /etc/hostid and /etc/zfs/zpool.cache exist for early import…"
-  [[ -f /etc/hostid ]] || zgenhostid -f
-  zpool set cachefile=/etc/zfs/zpool.cache "${POOL}"
+    [[ -f "$kernel_file" ]] && return 0
 
-  say "Rebuilding initramfs for ${KERNEL_BASENAME}…"
-  mkinitcpio -P
+    say "Installing kernel files to $target..."
+
+    # Try copying from ESP
+    if [[ -f "${EFI_DIR}/vmlinuz-${KERNEL_BASENAME}" ]]; then
+        cp "${EFI_DIR}"/vmlinuz-* "${EFI_DIR}"/initramfs-* "$target/" 2>/dev/null
+        cp "${EFI_DIR}"/*-ucode.img "$target/" 2>/dev/null || true
+    else
+        pacman -S --noconfirm "${KERNEL_BASENAME}"
+    fi
+
+    say "✓ Kernel files ready"
+}
+
+configure_mkinitcpio() {
+    say "Configuring mkinitcpio for ZFS..."
+
+    local cfg=/etc/mkinitcpio.conf
+
+    # Add zfs hook before filesystems
+    if ! grep -Eq 'HOOKS=.*\bzfs\b' "$cfg"; then
+        sed -i -E 's/(HOOKS=.*) filesystems/\1 zfs filesystems/' "$cfg"
+    fi
+
+    # Generate hostid and cache file
+    [[ -f /etc/hostid ]] || zgenhostid -f
+    zpool set cachefile=/etc/zfs/zpool.cache "${POOL}"
+
+    say "Rebuilding initramfs..."
+    mkinitcpio -P
 }
 
 write_zbm_config() {
-  say "Writing /etc/zfsbootmenu/config.yaml…"
-  cat >/etc/zfsbootmenu/config.yaml <<YAML
+    say "Writing ZBM configuration..."
+
+    cat >/etc/zfsbootmenu/config.yaml <<YAML
 Global:
   ManageImages: true
   BootTimeout: ${ZBM_TIMEOUT}
   BootMountPoint: "${EFI_DIR}"
-  RootPrefix: "root=ZFS="
-  KernelCmdline: "${ZBM_KERNEL_CMDLINE}"
-  DracutConfDir: /etc/zfsbootmenu/dracut.conf.d
-  PreHooksDir: /etc/zfsbootmenu/generate-zbm.pre.d
-  PostHooksDir: /etc/zfsbootmenu/generate-zbm.post.d
-  InitCPIOConfig: /etc/zfsbootmenu/mkinitcpio.conf
 
 EFI:
   Enabled: true
   ImageDir: "${ZBM_EFI_PATH}"
   Versions: false
-
-Components:
-  Enabled: false
-
-Kernel:
-  # Tell ZBM to use kernel from ESP instead of searching BEs
-  Path: "${EFI_DIR}/vmlinuz-${KERNEL_BASENAME}"
-  Initramfs: "${EFI_DIR}/initramfs-${KERNEL_BASENAME}.img"
 YAML
+
+    say "✓ ZBM config written"
 }
 
-write_dracut_conf() {
-  say "Writing dracut configuration for ZBM kernel discovery..."
-  
-  # This tells dracut/ZBM where to find kernels for ALL boot environments
-  cat >/etc/zfsbootmenu/dracut.conf.d/10-kernel-path.conf <<EOF
-# Tell ZBM to use kernels from ESP for all BEs
-kernel_cmdline="root=ZFS=${BE_DATASET} ${ZBM_KERNEL_CMDLINE}"
-uefi_stub="/usr/lib/systemd/boot/efi/linuxx64.efi.stub"
+write_post_hooks() {
+    say "Installing ZBM post-generation hooks..."
 
-# Use ESP kernels for all BE boots
-install_items+=" ${EFI_DIR}/vmlinuz-${KERNEL_BASENAME} "
-install_items+=" ${EFI_DIR}/initramfs-${KERNEL_BASENAME}.img "
-EOF
-
-  # Additional config to help with BE discovery
-  cat >/etc/zfsbootmenu/dracut.conf.d/20-zfs-be.conf <<EOF
-# Ensure ZBM can find and boot all BEs regardless of kernel location
-omit_dracutmodules+=" btrfs resume "
-add_dracutmodules+=" zfs zfsbootmenu "
-EOF
-}
-
-write_pre_snapshot_hook() {
-  say "Updating pre-snapshot hook to always include kernels..."
-  
-  # Override the existing hook to ensure /boot has kernels BEFORE snapshot
-  cat >/usr/local/sbin/zfs-pre-pacman-snapshot.sh <<'SH'
-#!/usr/bin/env bash
-# Enhanced snapshot script that ensures kernels are in /boot before snapshotting
-set -euo pipefail
-
-BATCH_WINDOW="${BATCH_WINDOW:-3}"
-BE="$(findmnt -no SOURCE /)"
-
-if [[ -z "$BE" ]]; then
-  echo "[zfs-pre-snap] Could not detect root dataset" >&2
-  exit 1
-fi
-
-# CRITICAL: Ensure kernel files are in /boot BEFORE taking snapshot
-# This makes all snapshots immediately bootable when cloned
-if [[ ! -f /boot/vmlinuz-linux-cachyos ]]; then
-  echo "[zfs-pre-snap] Ensuring kernel files in /boot before snapshot..."
-  
-  # Try to copy from ESP
-  if [[ -f /efi/vmlinuz-linux-cachyos ]]; then
-    cp /efi/vmlinuz-linux-cachyos /boot/
-    cp /efi/initramfs-linux-cachyos*.img /boot/ 2>/dev/null || true
-    [[ -f /efi/amd-ucode.img ]] && cp /efi/amd-ucode.img /boot/
-    [[ -f /efi/intel-ucode.img ]] && cp /efi/intel-ucode.img /boot/
-  else
-    # Last resort: reinstall kernel package
-    echo "[zfs-pre-snap] Reinstalling kernel package to populate /boot..."
-    pacman -S --noconfirm linux-cachyos
-  fi
-fi
-
-# Check for recent snapshots to avoid spam
-RECENT_SNAP=$(zfs list -H -t snapshot -o name,creation -s creation -r "$BE" 2>/dev/null | \
-  grep "@pacman-" | tail -1 || true)
-
-if [[ -n "$RECENT_SNAP" ]]; then
-  SNAP_NAME=$(echo "$RECENT_SNAP" | awk '{print $1}')
-  SNAP_TIME=$(echo "$RECENT_SNAP" | awk '{$1=""; print $0}' | sed 's/^ *//')
-  
-  SNAP_EPOCH=$(date -d "$SNAP_TIME" +%s 2>/dev/null || echo "0")
-  CURRENT_EPOCH=$(date +%s)
-  WINDOW_SECONDS=$((BATCH_WINDOW * 60))
-  
-  if [[ $SNAP_EPOCH -gt 0 ]] && [[ $((CURRENT_EPOCH - SNAP_EPOCH)) -lt $WINDOW_SECONDS ]]; then
-    AGE_SEC=$(( CURRENT_EPOCH - SNAP_EPOCH ))
-    echo "[zfs-pre-snap] Recent snapshot exists (${AGE_SEC}s ago), skipping"
-    exit 0
-  fi
-fi
-
-# Create snapshot with kernel files already in place
-STAMP="$(date +%Y%m%d-%H%M%S)"
-TAG="pacman-${STAMP}"
-
-echo "[zfs-pre-snap] Creating snapshot ${BE}@${TAG}"
-zfs snapshot "${BE}@${TAG}"
-zfs set custom:pacman_version="$(pacman -Q pacman | cut -d' ' -f2)" "${BE}@${TAG}"
-zfs set custom:kernel_version="$(uname -r)" "${BE}@${TAG}"
-zfs set custom:package_count="$(pacman -Q | wc -l)" "${BE}@${TAG}"
-
-echo "[zfs-pre-snap] Snapshot created with kernel files included"
-exit 0
-SH
-  chmod +x /usr/local/sbin/zfs-pre-pacman-snapshot.sh
-}
-
-write_post_hook_rename() {
-  say "Writing post-hook to create stable UKI filenames..."
-  cat >/etc/zfsbootmenu/generate-zbm.post.d/10-rename-uki.sh <<'SH'
+    # Stable filename hook
+    cat >/etc/zfsbootmenu/generate-zbm.post.d/10-stable-names.sh <<'HOOK'
 #!/usr/bin/env bash
 set -euo pipefail
+
 ESP_DIR="/efi/EFI/ZBM"
-LOG="/var/log/zfsbootmenu/uki-rename.log"
-mkdir -p "$(dirname "$LOG")" || true
-ts(){ date '+%F %T'; }
-log(){ echo "[$(ts)] $*" | tee -a "$LOG" >&2; }
+NEW="$(ls -1t "${ESP_DIR}"/vmlinuz-*.EFI 2>/dev/null | grep -v backup | head -n1)"
 
-NEW_MAIN="$(ls -1t "${ESP_DIR}"/vmlinuz-*.EFI 2>/dev/null | grep -v -- '-backup\.EFI$' | head -n1 || true)"
-if [[ -z "$NEW_MAIN" ]]; then
-  log "No vmlinuz-*.EFI found in ${ESP_DIR}; nothing to do."
-  exit 0
-fi
+[[ -z "$NEW" ]] && exit 0
 
-base="${NEW_MAIN%.EFI}"
-BUILDER_BKP="${base}-backup.EFI"
+# Rotate backups
+[[ -f "${ESP_DIR}/ZFSBootMenu.EFI" ]] && \
+    mv -f "${ESP_DIR}/ZFSBootMenu.EFI" "${ESP_DIR}/ZFSBootMenu-backup.EFI"
 
-if [[ -f "$BUILDER_BKP" ]]; then
-  log "Using builder backup $(basename "$BUILDER_BKP") -> ZFSBootMenu-fallback.EFI"
-  mv -f "$BUILDER_BKP" "${ESP_DIR}/ZFSBootMenu-fallback.EFI"
-elif [[ -f "${ESP_DIR}/ZFSBootMenu.EFI" ]]; then
-  log "No builder backup; preserving current ZFSBootMenu.EFI -> ZFSBootMenu-fallback.EFI"
-  mv -f "${ESP_DIR}/ZFSBootMenu.EFI" "${ESP_DIR}/ZFSBootMenu-fallback.EFI"
-fi
+# Set new stable
+mv -f "$NEW" "${ESP_DIR}/ZFSBootMenu.EFI"
+echo "[zbm-hook] Updated ZFSBootMenu.EFI"
+HOOK
+    chmod +x /etc/zfsbootmenu/generate-zbm.post.d/10-stable-names.sh
 
-log "Setting new stable: $(basename "$NEW_MAIN") -> ZFSBootMenu.EFI"
-mv -f "$NEW_MAIN" "${ESP_DIR}/ZFSBootMenu.EFI"
-SH
-  chmod +x /etc/zfsbootmenu/generate-zbm.post.d/10-rename-uki.sh
+    say "✓ Post-hooks installed"
 }
 
-write_generate_zbm_hook() {
-  say "Installing pacman hook to rebuild ZBM after kernel updates…"
-  cat >/etc/pacman.d/hooks/90-generate-zbm.hook <<HOOK
-[Trigger]
-Operation = Install
-Operation = Upgrade
-Type = Package
-Target = ${KERNEL_BASENAME}
+sync_kernels_to_esp() {
+    say "Syncing kernels to ESP..."
 
-[Action]
-When = PostTransaction
-Exec = /usr/bin/generate-zbm
-Description = Rebuild ZFSBootMenu UKI after ${KERNEL_BASENAME} updates
-HOOK
-}
+    # Ensure kernels are in /boot first
+    ensure_kernels /boot
 
-write_copy_to_esp_bits() {
-  say "Adding helper + hook to keep kernels on ESP..."
-  
-  cat >/usr/local/sbin/copy-kernel-to-esp.sh <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-ESP=${ESP:-/efi}
-ESP_DEV=${ESP_DEV:-}
-K=/boot/vmlinuz-linux-cachyos
-I=/boot/initramfs-linux-cachyos.img
+    # Copy to ESP
+    for f in /boot/vmlinuz-* /boot/initramfs-* /boot/*-ucode.img; do
+        [[ -f "$f" ]] && cp -f "$f" "${EFI_DIR}/" 2>/dev/null || true
+    done
 
-# ALWAYS keep kernels in /boot for snapshots to include them
-if [[ -f "$K" ]]; then
-  echo "[copy-kernel] Ensuring kernels in /boot for future snapshots"
-else
-  echo "[copy-kernel] WARNING: No kernel in /boot - future snapshots won't be bootable!"
-fi
-
-mkdir -p "$ESP"
-mounted_before=false
-
-if ! findmnt -no FSTYPE "$ESP" 2>/dev/null | grep -qx 'vfat'; then
-  if [[ -n "$ESP_DEV" ]]; then
-    echo "[copy-kernel] Mounting $ESP_DEV at $ESP"
-    mount -t vfat "$ESP_DEV" "$ESP" || { echo "[copy-kernel] mount failed"; exit 0; }
-    mounted_before=true
-  else
-    echo "[copy-kernel] $ESP not mounted and ESP_DEV not set; skipping."
-    exit 0
-  fi
-fi
-
-[[ -f "$K" ]] && install -m0644 "$K" "$ESP/"
-[[ -f "$I" ]] && install -m0644 "$I" "$ESP/"
-[[ -f /boot/amd-ucode.img   ]] && install -m0644 /boot/amd-ucode.img   "$ESP/"
-[[ -f /boot/intel-ucode.img ]] && install -m0644 /boot/intel-ucode.img "$ESP/"
-
-$mounted_before && umount "$ESP" || true
-exit 0
-SH
-  chmod +x /usr/local/sbin/copy-kernel-to-esp.sh
-  
-  cat >/etc/pacman.d/hooks/10-copy-kernel-to-esp.hook <<HOOK
-[Trigger]
-Operation = Install
-Operation = Upgrade
-Type = Package
-Target = linux-cachyos
-
-[Action]
-When = PostTransaction
-Exec = /usr/bin/env ESP_DEV=${ESP_DEV} /usr/local/sbin/copy-kernel-to-esp.sh
-Description = Mirror kernel/initramfs to ESP and ensure in /boot
-HOOK
+    say "✓ Kernels synced to ESP"
 }
 
 generate_zbm_images() {
-  say "Generating ZBM UKIs…"
-  generate-zbm -d
-  ls -lh "${ZBM_EFI_PATH}" || true
+    say "Generating ZFSBootMenu images..."
+
+    if generate-zbm; then
+        say "✓ ZBM images generated"
+        ls -lh "${ZBM_EFI_PATH}"/*.EFI 2>/dev/null || true
+    else
+        warn "ZBM generation had warnings - check output"
+    fi
 }
 
-create_uefi_entry_if_missing() {
-  say "Ensuring UEFI boot entry exists…"
-  if efibootmgr -v | grep -qi "ZFSBootMenu"; then
-    say "ZFSBootMenu NVRAM entry already present."
-  else
-    local disk partnum
+create_uefi_entry() {
+    say "Configuring UEFI boot entry..."
 
+    if efibootmgr | grep -q "ZFSBootMenu"; then
+        say "✓ ZFSBootMenu entry already exists"
+        return 0
+    fi
+
+    # Determine disk and partition
+    local disk partnum
     if command -v lsblk >/dev/null && lsblk --help 2>&1 | grep -q PARTNUM; then
-      disk="/dev/$(lsblk -no PKNAME "${ESP_DEV}")"
-      partnum="$(lsblk -no PARTNUM "${ESP_DEV}")"
+        disk="/dev/$(lsblk -no PKNAME "${ESP_DEV}")"
+        partnum="$(lsblk -no PARTNUM "${ESP_DEV}")"
     else
-      disk="${ESP_DEV%[0-9]*}"
-      partnum="${ESP_DEV##*[!0-9]}"
+        disk="${ESP_DEV%[0-9]*}"
+        partnum="${ESP_DEV##*[!0-9]}"
     fi
 
     efibootmgr -c -d "${disk}" -p "${partnum}" \
-      -L "ZFSBootMenu" -l '\EFI\ZBM\ZFSBootMenu.EFI'
-    say "Created UEFI entry: ZFSBootMenu"
-  fi
+        -L "ZFSBootMenu" -l '\EFI\ZBM\ZFSBootMenu.EFI' && \
+        say "✓ Created UEFI entry: ZFSBootMenu" || \
+        warn "Could not create UEFI entry - add manually"
 }
 
-ensure_initial_kernels_everywhere() {
-  say "Final kernel sync to ensure everything has kernels..."
-  
-  # Make absolutely sure /boot has kernels
-  if [[ ! -f /boot/vmlinuz-${KERNEL_BASENAME} ]]; then
-    if [[ -f ${EFI_DIR}/vmlinuz-${KERNEL_BASENAME} ]]; then
-      cp ${EFI_DIR}/vmlinuz-${KERNEL_BASENAME} /boot/
-      cp ${EFI_DIR}/initramfs-${KERNEL_BASENAME}*.img /boot/
-    else
-      pacman -S --noconfirm ${KERNEL_BASENAME}
+final_summary() {
+    say "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    say "ZFSBootMenu Setup Complete!"
+    say "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    echo "Configuration Summary:"
+    echo "  Pool:        ${POOL}"
+    echo "  Boot Dataset: ${BE_DATASET}"
+    echo "  ESP:         ${ESP_DEV} → ${EFI_DIR}"
+    echo "  ZBM Images:  ${ZBM_EFI_PATH}"
+    echo ""
+
+    echo "Mount Status:"
+    findmnt -no FSTYPE,SOURCE,TARGET / /boot "${EFI_DIR}" 2>/dev/null | column -t
+    echo ""
+
+    echo "Kernel Locations:"
+    ls -la /boot/vmlinuz-* 2>/dev/null | head -n1 || echo "  None in /boot"
+    ls -la "${EFI_DIR}"/vmlinuz-* 2>/dev/null | head -n1 || echo "  None in ESP"
+    echo ""
+
+    echo "Next Steps:"
+    echo "1. Reboot and select ZFSBootMenu from UEFI menu"
+    echo "2. Press ESC at ZBM countdown to see boot environments"
+    echo "3. Run './validate-setup.sh' to verify configuration"
+
+    if [[ "${PERSISTENT_ESP}" != "true" ]]; then
+        say "Unmounting ESP (ZBM will mount on demand)..."
+        umount "${EFI_DIR}" 2>/dev/null || true
     fi
-  fi
-  
-  # And ESP has kernels
-  if [[ ! -f ${EFI_DIR}/vmlinuz-${KERNEL_BASENAME} ]]; then
-    cp /boot/vmlinuz-${KERNEL_BASENAME} ${EFI_DIR}/
-    cp /boot/initramfs-${KERNEL_BASENAME}*.img ${EFI_DIR}/
-  fi
-  
-  say "✓ Kernels present in both /boot and ESP"
-}
-
-final_checks() {
-  say "Final configuration status:"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  findmnt -no FSTYPE,SOURCE,TARGET /
-  findmnt -no FSTYPE,SOURCE,TARGET /boot || true
-  findmnt -no FSTYPE,SOURCE,TARGET "${EFI_DIR}" || true
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  zpool get bootfs "${POOL}"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "Kernel locations:"
-  ls -la /boot/vmlinuz-* 2>/dev/null || echo "  None in /boot"
-  ls -la ${EFI_DIR}/vmlinuz-* 2>/dev/null || echo "  None in ESP"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "ZBM will use: root=ZFS=${BE_DATASET}"
 }
 
 main() {
-  require_root
-  ensure_rw_root
-  install_required_packages
-  detect_esp "$@"
-  ensure_dirs
-  move_esp_to_efi_if_needed
-  maybe_persist_esp_mount
-  set_dataset_layout
-  set_zbm_dataset_properties
-  ensure_kernel_files_in_boot
-  ensure_mkinitcpio_has_zfs
-  write_zbm_config
-  write_dracut_conf
-  write_pre_snapshot_hook
-  write_post_hook_rename
-  write_generate_zbm_hook
-  write_copy_to_esp_bits
-  ensure_initial_kernels_everywhere
-  generate_zbm_images
-  create_uefi_entry_if_missing
-  final_checks
-  
-  if [[ "${PERSISTENT_ESP}" != "true" ]]; then
-    say "Un-mounting ESP (ZBM will mount it on demand)…"
-    umount "${EFI_DIR}" || true
-  fi
-  
-  say "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  say "✓ Setup complete!"
-  say ""
-  say "Key changes made:"
-  say "• Kernels kept in /boot (on root dataset) for snapshots"
-  say "• Kernels mirrored to ESP for ZBM to use"
-  say "• Pre-snapshot hook ensures kernels before snapshot"
-  say "• ZBM configured to use ESP kernels for all BEs"
-  say ""
-  say "This means:"
-  say "• All snapshots will include kernel files"
-  say "• Cloned BEs will be immediately bootable"
-  say "• No need to manually sync kernels"
-  say "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    require_root
+    ensure_rw_root
+
+    detect_esp "$@"
+    install_required_packages
+    ensure_dirs
+
+    setup_esp_mount
+    configure_zfs_datasets
+    ensure_kernels /boot
+    configure_mkinitcpio
+
+    write_zbm_config
+    write_post_hooks
+    sync_kernels_to_esp
+
+    generate_zbm_images
+    create_uefi_entry
+
+    final_summary
 }
 
 main "$@"
