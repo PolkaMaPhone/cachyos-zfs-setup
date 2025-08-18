@@ -51,16 +51,29 @@ check_root_on_zfs() {
 }
 
 check_boot_directory() {
-    local boot_fs=$(findmnt -no FSTYPE /boot 2>/dev/null || echo "none")
-
-    if [[ "$boot_fs" == "zfs" ]] || [[ "$boot_fs" == "none" ]]; then
-        if [[ -d /boot ]] && [[ -f /boot/vmlinuz-linux-cachyos ]]; then
-            pass "/boot is a directory on ZFS with kernel files"
+    # Check if /boot is a separate mount point
+    if findmnt /boot >/dev/null 2>&1; then
+        local boot_fs=$(findmnt -no FSTYPE /boot)
+        if [[ "$boot_fs" == "zfs" ]]; then
+            pass "/boot is a ZFS dataset"
+        elif [[ "$boot_fs" == "vfat" ]]; then
+            fail "/boot is on ESP (vfat) - should be on ZFS for snapshots"
+            return 1
         else
-            fail "/boot missing kernel files (required for ZBM)"
+            fail "/boot is on $boot_fs (should be on ZFS)"
+            return 1
         fi
     else
-        fail "/boot is on $boot_fs (should be on ZFS root dataset)"
+        # /boot is not a mount point - it's a directory on root
+        if [[ -d /boot ]]; then
+            if [[ -f /boot/vmlinuz-linux-cachyos ]]; then
+                pass "/boot is a directory on root filesystem with kernel files"
+            else
+                warn "/boot exists but missing kernel files"
+            fi
+        else
+            fail "/boot directory does not exist"
+        fi
     fi
 }
 
