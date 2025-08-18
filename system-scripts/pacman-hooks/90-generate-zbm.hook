@@ -1,0 +1,10 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = linux-cachyos
+
+[Action]
+When = PostTransaction
+Exec = /usr/bin/generate-zbm
+Description = Rebuild ZFSBootMenu UKI after linux-cachyos updates

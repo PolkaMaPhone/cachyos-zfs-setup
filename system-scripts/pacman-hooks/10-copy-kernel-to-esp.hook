@@ -1,0 +1,11 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = linux-cachyos
+
+[Action]
+When = PostTransaction
+# provide your ESP device explicitly:
+Exec = /usr/bin/env ESP_DEV=/dev/nvme0n1p1 /usr/local/sbin/copy-kernel-to-esp.sh
+Description = Mirror kernel/initramfs to ESP for systemd-boot fallback

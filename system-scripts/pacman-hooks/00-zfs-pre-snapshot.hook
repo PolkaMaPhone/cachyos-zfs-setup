@@ -1,0 +1,11 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Package
+Target = *
+
+[Action]
+Description = ZFS snapshot of root BE (pre-transaction)
+When = PreTransaction
+Exec = /usr/bin/env BATCH_WINDOW=5 /usr/local/sbin/zfs-pre-pacman-snapshot.sh

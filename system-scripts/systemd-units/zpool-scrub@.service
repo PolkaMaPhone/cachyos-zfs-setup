@@ -1,0 +1,6 @@
+[Unit]
+Description=ZFS scrub on %i
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/zpool scrub %i

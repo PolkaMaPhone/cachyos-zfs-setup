@@ -1,0 +1,10 @@
+alvr-nvidia 20.14.1-5
+android-apktool 2.12.0-1
+android-sdk-build-tools r35.0.1-1
+brother-hll3270cdw 1.0.2-1
+c++utilities 5.30.0-1
+lmstudio 0.3.23.3-1
+qrookie-vrp 0.4.2-1
+qtforkawesome-qt6 0.3.1-1
+qtutilities-qt6 6.18.0-1
+syncthingtray-qt6 2.0.0-1
