@@ -168,6 +168,46 @@ set_zbm_dataset_properties() {
   say "ZBM dataset properties configured"
 }
 
+ensure_kernel_files_in_boot() {
+  say "Ensuring kernel files are available in /boot for mkinitcpio..."
+
+  # Make sure /boot directory exists
+  mkdir -p /boot
+
+  local kernel_file="/boot/vmlinuz-${KERNEL_BASENAME}"
+  local initramfs_file="/boot/initramfs-${KERNEL_BASENAME}.img"
+  local fallback_file="/boot/initramfs-${KERNEL_BASENAME}-fallback.img"
+
+  # Check if kernel files are missing from /boot
+  if [[ ! -f "$kernel_file" ]]; then
+    say "Kernel files missing from /boot, checking for sources..."
+
+    # Option 1: Copy from ESP if they exist there
+    if [[ -f "${EFI_DIR}/vmlinuz-${KERNEL_BASENAME}" ]]; then
+      say "Copying kernel files from ESP to /boot..."
+      cp "${EFI_DIR}/vmlinuz-${KERNEL_BASENAME}" /boot/
+      cp "${EFI_DIR}/initramfs-${KERNEL_BASENAME}"* /boot/ 2>/dev/null || true
+    # Option 2: Reinstall kernel package to populate /boot
+    elif pacman -Q "${KERNEL_BASENAME}" >/dev/null 2>&1; then
+      say "Kernel package installed but files missing, reinstalling..."
+      pacman -S --noconfirm "${KERNEL_BASENAME}"
+    # Option 3: Install kernel package if not present
+    else
+      say "Installing kernel package: ${KERNEL_BASENAME}..."
+      pacman -S --noconfirm "${KERNEL_BASENAME}"
+    fi
+  else
+    say "Kernel files already present in /boot"
+  fi
+
+  # Verify kernel files are now available
+  if [[ ! -f "$kernel_file" ]]; then
+    die "Failed to ensure kernel files in /boot. Manual intervention required."
+  fi
+
+  say "✓ Kernel files ready in /boot for mkinitcpio"
+}
+
 ensure_mkinitcpio_has_zfs() {
   say "Ensuring mkinitcpio HOOKS includes 'zfs' before 'filesystems'…"
   local cfg=/etc/mkinitcpio.conf
@@ -370,6 +410,7 @@ main() {
   maybe_persist_esp_mount
   set_dataset_layout
   set_zbm_dataset_properties
+  ensure_kernel_files_in_boot
   ensure_mkinitcpio_has_zfs
   write_zbm_config
   write_post_hook_rename
