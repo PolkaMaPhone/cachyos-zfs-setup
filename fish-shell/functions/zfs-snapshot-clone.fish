@@ -42,6 +42,13 @@ function zfs-snapshot-clone --description 'Clone ZFS snapshot to new dataset'
 
     eval $cmd
     if test $status -eq 0
+        set -l mnt (mktemp -d)
+        if sudo mount -t zfs $clone_name $mnt
+            sudo rm -f $mnt/var/lib/pacman/db.lck
+            sudo umount $mnt
+        end
+        rmdir $mnt
+
         echo "Cloned $snapshot to $clone_name"
     end
 end
