@@ -17,17 +17,22 @@ WARNINGS=0
 
 # Test result functions
 pass() {
-    printf "${GREEN}✓${NC} %s\n" "$1"
+    # Send result output to stderr so command substitutions only capture
+    # explicit echo values from functions. This prevents assignments like
+    # ROOT_DATASET=$(check_root_on_zfs) from including the status line in
+    # the variable, which previously caused downstream commands (such as
+    # snapshot detection) to fail.
+    printf "${GREEN}✓${NC} %s\n" "$1" >&2
     let PASSED+=1
 }
 
 fail() {
-    printf "${RED}✗${NC} %s\n" "$1"
+    printf "${RED}✗${NC} %s\n" "$1" >&2
     let FAILED+=1
 }
 
 warn() {
-    printf "${YELLOW}⚠${NC} %s\n" "$1"
+    printf "${YELLOW}⚠${NC} %s\n" "$1" >&2
     let WARNINGS+=1
 }
 
