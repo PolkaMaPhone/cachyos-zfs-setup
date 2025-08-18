@@ -27,7 +27,7 @@ cd cachyos-zfs-setup
 sudo ./install.sh
 
 # 2. Configure ZBM (ensures kernels in /boot)
-sudo ./system-scripts/zbm-setup.sh /dev/nvme0n1p1
+sudo ./system-scripts/zbm-setup.sh *BE CAREFUL*
 
 # 3. Complete setup (activates hooks)
 sudo /usr/local/sbin/finish-zfs-setup.sh
