@@ -314,6 +314,49 @@ H_HOOK
   echo "✓ Pacman hooks installed (embedded)"
 }
 
+main() {
+    # Check we're running as root
+    [[ $EUID -eq 0 ]] || { echo "Error: Run as root (sudo ./install.sh)"; exit 1; }
+    [[ -n "${SUDO_USER:-}" ]] || { echo "Error: Must use sudo, not direct root"; exit 1; }
+
+    # Detect installation stage
+    local zbm_configured=$(detect_setup_stage || echo "not-detected")
+
+    if [[ "$zbm_configured" == "detected" ]]; then
+        echo "ZBM already configured - full installation mode"
+
+        # If ZBM is configured, ensure kernels are in /boot first
+        ensure_kernels_in_boot
+
+        # Install everything including hooks
+        install_fish_config
+        install_system_scripts
+        install_pacman_hooks  # Safe to install now
+        enable_zfs_automation
+        set_fish_default
+
+        # Clean up any bad snapshots that might have been created
+        cleanup_unbootable_snapshots
+
+    else
+        echo "ZBM not yet configured - minimal installation mode"
+        echo "Deferring pacman hooks until after ZBM setup"
+
+        # Install everything EXCEPT pacman hooks
+        install_fish_config
+        stage_pacman_hooks
+        install_system_scripts  # Scripts only, no hooks
+        set_fish_default
+
+        # Create a script to finish installation after ZBM setup
+
+        # Install embedded hooks now (safe: pre-snapshot hook skips until bootable)
+        install_embedded_pacman_hooks
+        enable_zfs_automation
+        set_fish_default
+        echo ""
+        echo "=== Hooks installed ==="
+        echo "Pacman hooks are active. The snapshot hook will skip until your BE is bootable."
 fi
 
     echo ""
