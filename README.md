@@ -11,9 +11,33 @@ Personal CachyOS configuration with ZFS boot environments and comprehensive auto
 - **Fish shell** with comprehensive ZFS management functions
 - **Dual bootloader** setup (ZBM + systemd-boot fallback)
 
+## Assumptions:
+
+- ** CachyOS with systemd-boot on zfs filesystem
+
+
+## Recommended Installation flow
+ 
+```bash
+
+git clone https://github.com/polkamaphone/cachyos-zfs-setup.git
+cd cachyos-zfs-setup
+
+# 1. Initial setup (no hooks activated)
+sudo ./install.sh
+
+# 2. Configure ZBM (ensures kernels in /boot)
+sudo ./system-scripts/zbm-setup.sh /dev/nvme0n1p1
+
+# 3. Complete setup (activates hooks)
+sudo /usr/local/sbin/finish-zfs-setup.sh
+
+
 ## Quick Install (Existing System)
 
 ```bash
 git clone https://github.com/polkamaphone/cachyos-zfs-setup.git
 cd cachyos-zfs-setup
 sudo ./install.sh
+
+
