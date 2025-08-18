@@ -292,6 +292,48 @@ SH
   chmod +x /etc/zfsbootmenu/generate-zbm.post.d/10-rename-uki.sh
 }
 
+write_post_hook_ensure_kernels() {
+  say "Writing post-hook to ensure all BEs have kernel files..."
+  cat >/etc/zfsbootmenu/generate-zbm.post.d/20-ensure-be-kernels.sh <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOG="/var/log/zfsbootmenu/kernel-ensure.log"
+mkdir -p "$(dirname "$LOG")" || true
+ts(){ date '+%F %T'; }
+log(){ echo "[$(ts)] $*" | tee -a "$LOG" >&2; }
+
+# Find all boot environments that need kernel files
+while IFS= read -r be_root; do
+    be_name=$(basename $(dirname "$be_root"))
+
+    # Skip if it's the current running BE
+    [[ "$be_root" == "$(findmnt -no SOURCE /)" ]] && continue
+
+    # Mount BE and check for kernels
+    temp_mount="/mnt/zbm-kernel-check-$$"
+    mkdir -p "$temp_mount"
+
+    if mount -t zfs "$be_root" "$temp_mount" 2>/dev/null; then
+        if [[ ! -f "$temp_mount/boot/vmlinuz-linux-cachyos" ]]; then
+            log "Adding kernel files to BE: $be_name"
+            mkdir -p "$temp_mount/boot"
+            cp /boot/* "$temp_mount/boot/" 2>/dev/null || true
+            log "✓ Kernel files added to $be_name"
+        fi
+        umount "$temp_mount"
+    else
+        log "Failed to mount $be_root for kernel check"
+    fi
+
+    rmdir "$temp_mount" 2>/dev/null || true
+done < <(zfs list -H -o name -r zpcachyos/ROOT 2>/dev/null | grep "/root$" || true)
+
+log "Kernel file check complete"
+SH
+  chmod +x /etc/zfsbootmenu/generate-zbm.post.d/20-ensure-be-kernels.sh
+}
+
 write_generate_zbm_hook() {
   say "Installing pacman hook to rebuild ZBM after kernel updates…"
   cat >/etc/pacman.d/hooks/90-generate-zbm.hook <<HOOK
@@ -390,6 +432,40 @@ create_uefi_entry_if_missing() {
     say "Created UEFI entry: ZFSBootMenu"
   fi
 }
+ensure_kernel_files_synced() {
+  say "Ensuring kernel files are synced between /boot and ESP..."
+
+  # Make sure /boot directory exists on ZFS
+  mkdir -p /boot
+
+  local kernel_file="/boot/vmlinuz-${KERNEL_BASENAME}"
+  local initramfs_file="/boot/initramfs-${KERNEL_BASENAME}.img"
+
+  # If /boot is missing files, get them from ESP or package
+  if [[ ! -f "$kernel_file" ]]; then
+    if [[ -f "${EFI_DIR}/vmlinuz-${KERNEL_BASENAME}" ]]; then
+      say "Copying kernel files from ESP to /boot..."
+      install -m0644 "${EFI_DIR}/vmlinuz-${KERNEL_BASENAME}" /boot/
+      install -m0644 "${EFI_DIR}/initramfs-${KERNEL_BASENAME}.img" /boot/
+      [[ -f "${EFI_DIR}/amd-ucode.img" ]] && install -m0644 "${EFI_DIR}/amd-ucode.img" /boot/
+      [[ -f "${EFI_DIR}/intel-ucode.img" ]] && install -m0644 "${EFI_DIR}/intel-ucode.img" /boot/
+    else
+      say "Installing kernel package to populate /boot..."
+      pacman -S --noconfirm "${KERNEL_BASENAME}"
+    fi
+  fi
+
+  # Sync /boot files to ESP (for systemd-boot fallback)
+  if [[ -f "$kernel_file" ]]; then
+    say "Syncing kernel files from /boot to ESP..."
+    install -m0644 /boot/vmlinuz-* "${EFI_DIR}/"
+    install -m0644 /boot/initramfs-* "${EFI_DIR}/"
+    [[ -f /boot/amd-ucode.img ]] && install -m0644 /boot/amd-ucode.img "${EFI_DIR}/"
+    [[ -f /boot/intel-ucode.img ]] && install -m0644 /boot/intel-ucode.img "${EFI_DIR}/"
+  fi
+
+  say "✓ Kernel files synced"
+}
 
 final_checks() {
   say "Quick status:"
@@ -414,10 +490,12 @@ main() {
   ensure_mkinitcpio_has_zfs
   write_zbm_config
   write_post_hook_rename
+  write_post_hook_ensure_kernels
   write_generate_zbm_hook
   write_copy_to_esp_bits_if_enabled
   generate_zbm_images
   create_uefi_entry_if_missing
+  ensure_kernel_files_synced
   final_checks
   if [[ "${PERSISTENT_ESP}" != "true" ]]; then
     say "Un-mounting ESP (ZBM will mount it on demand)…"
