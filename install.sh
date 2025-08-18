@@ -8,6 +8,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 USER_HOME="/home/$SUDO_USER"
 
 echo "=== CachyOS ZFS Setup Installation ==="
+# Stage pacman hook assets to a fixed location so finish script is repo-agnostic
+stage_pacman_hooks() {
+    local REPO_ROOT="$SCRIPT_DIR"
+    local SRC_DIR="$REPO_ROOT/system-scripts/pacman-hooks"
+    local DATA_DIR="/usr/local/share/cachyos-zfs-setup/pacman-hooks"
+
+    install -d "$DATA_DIR"
+    if [[ -d "$SRC_DIR" ]]; then
+        install -m 0644 "$SRC_DIR"/*.hook "$DATA_DIR"/
+        echo "Staged pacman hooks to $DATA_DIR"
+    else
+        echo "Warning: $SRC_DIR not found; pacman hooks will need to be supplied later"
+    fi
+}
+
 
 # Function to ensure kernels are in /boot BEFORE hooks are active
 ensure_kernels_in_boot() {
@@ -186,41 +201,73 @@ main() {
         
         # Install everything EXCEPT pacman hooks
         install_fish_config
+        stage_pacman_hooks
         install_system_scripts  # Scripts only, no hooks
         set_fish_default
         
         # Create a script to finish installation after ZBM setup
         cat > /usr/local/sbin/finish-zfs-setup.sh <<'EOF'
-#!/bin/bash
-# Finish ZFS setup after ZBM is configured
-echo "Completing ZFS setup..."
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Ensure kernels are in /boot
-if [[ ! -f /boot/vmlinuz-linux-cachyos ]]; then
-    for esp_dir in /efi /boot/efi; do
-        if [[ -f "$esp_dir/vmlinuz-linux-cachyos" ]]; then
-            cp "$esp_dir/vmlinuz-linux-cachyos" /boot/
-            cp "$esp_dir/initramfs-linux-cachyos"*.img /boot/ 2>/dev/null || true
-            break
-        fi
-    done
+# Default source of hooks is the staged copy; allow override by flag or env
+HOOKS_SRC="${HOOKS_SRC:-/usr/local/share/cachyos-zfs-setup/pacman-hooks}"
+
+usage() {
+  echo "Usage: $0 [--hooks-src PATH]"
+  echo "  or set HOOKS_SRC=/path/to/hooks before calling"
+}
+
+if [[ "${1:-}" == "--hooks-src" ]]; then
+  HOOKS_SRC="${2:-}"; shift 2 || { usage; exit 2; }
+elif [[ "${1:-}" != "" ]]; then
+  usage; exit 2
 fi
 
-# Install pacman hooks
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -d "$SCRIPT_DIR/../cachyos-zfs-setup/system-scripts/pacman-hooks" ]]; then
-    cp "$SCRIPT_DIR/../cachyos-zfs-setup/system-scripts/pacman-hooks/"*.hook /etc/pacman.d/hooks/
-elif [[ -d "/root/cachyos-zfs-setup/system-scripts/pacman-hooks" ]]; then
-    cp "/root/cachyos-zfs-setup/system-scripts/pacman-hooks/"*.hook /etc/pacman.d/hooks/
-else
-    echo "Warning: Could not find pacman hooks to install"
+# Ensure /boot has a kernel+initramfs (or UKI) before installing hooks
+ensure_boot_assets() {
+  shopt -s nullglob
+  local kernels=( /boot/vmlinuz* /boot/linux* /boot/Image* /boot/*.efi )
+  local inits=( /boot/initramfs-* /boot/initrd-* /boot/*.efi )
+  shopt -u nullglob
+  if (( ${#kernels[@]} > 0 && ${#inits[@]} > 0 )); then
+    return 0
+  fi
+  # Try to copy from ESP common locations if missing
+  for esp in /efi /boot/efi; do
+    if [[ -f "$esp/vmlinuz-linux-cachyos" ]]; then
+      cp -f "$esp/vmlinuz-linux-cachyos" /boot/ || true
+    fi
+    compgen -G "$esp/initramfs-linux-cachyos*.img" >/dev/null 2>&1 && cp -f "$esp"/initramfs-linux-cachyos*.img /boot/ || true
+    [[ -f "$esp/amd-ucode.img" ]] && cp -f "$esp/amd-ucode.img" /boot/ || true
+    [[ -f "$esp/intel-ucode.img" ]] && cp -f "$esp/intel-ucode.img" /boot/ || true
+  done
+}
+
+ensure_boot_assets
+
+if [[ ! -d "$HOOKS_SRC" ]]; then
+  echo "Error: hooks source not found: $HOOKS_SRC"
+  exit 1
 fi
 
-# Enable ZFS automation
+install -d /etc/pacman.d/hooks
+shopt -s nullglob
+hooks=( "$HOOKS_SRC"/*.hook )
+shopt -u nullglob
+
+if (( ${#hooks[@]} == 0 )); then
+  echo "Error: no .hook files in $HOOKS_SRC"
+  exit 1
+fi
+
+install -m 0644 -t /etc/pacman.d/hooks "${hooks[@]}"
+
+# Enable ZFS automation (best-effort)
 systemctl enable --now zpool-scrub@zpcachyos.timer 2>/dev/null || true
 
-echo "✓ ZFS setup completed!"
-echo "✓ Pacman hooks are now active"
+echo "✓ Pacman hooks installed from: $HOOKS_SRC"
+echo "✓ ZFS automation timer enabled (if available)
 EOF
         chmod +x /usr/local/sbin/finish-zfs-setup.sh
         
@@ -231,8 +278,9 @@ EOF
         echo "After running zbm-setup.sh, complete the installation with:"
         echo "  sudo /usr/local/sbin/finish-zfs-setup.sh"
         echo ""
-        echo "Or manually copy hooks:"
-        echo "  sudo cp $SCRIPT_DIR/system-scripts/pacman-hooks/*.hook /etc/pacman.d/hooks/"
+        echo "You can override hook source when finishing:"
+        echo "  sudo HOOKS_SRC=/path/to/hooks /usr/local/sbin/finish-zfs-setup.sh"
+        echo "  or: /usr/local/sbin/finish-zfs-setup.sh --hooks-src /path/to/hooks"
     fi
     
     echo ""
