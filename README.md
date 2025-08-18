@@ -14,6 +14,6 @@ Personal CachyOS configuration with ZFS boot environments and comprehensive auto
 ## Quick Install (Existing System)
 
 ```bash
-git clone git@github.com:polkamaphone/cachyos-zfs-setup.git
+git clone https://github.com/polkamaphone/cachyos-zfs-setup.git
 cd cachyos-zfs-setup
 sudo ./install.sh
