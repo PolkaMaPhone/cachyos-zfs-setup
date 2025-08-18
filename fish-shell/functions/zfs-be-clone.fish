@@ -93,6 +93,6 @@ function zfs-be-clone --description 'Clone snapshot to boot environment'
         eval $gen_cmd
         echo "Boot menu updated"
     else
-        echo "Run 'sudo generate-zbm' to update boot menu"
+        echo "Run 'sudo generate-zbm' to rebuild boot menu efi"
     end
 end
