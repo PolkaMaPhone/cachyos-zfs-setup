@@ -101,6 +101,12 @@ ensure_dirs() {
 move_esp_to_efi_if_needed() {
   # Goal: /boot is a dir on ZFS; ESP is not mounted on /boot.
   local boot_fs
+
+  if findmnt -no SOURCE /efi 2>/dev/null | grep -q "$ESP_DEV"; then
+    say "ESP already mounted at /efi, no move needed"
+    return 0
+  fi
+
   boot_fs="$(findmnt -no FSTYPE /boot || true)"
   if [[ "$boot_fs" == "vfat" ]]; then
     say "ESP currently at /boot; moving it to ${EFI_DIR}…"
