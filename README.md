@@ -31,13 +31,3 @@ sudo ./system-scripts/zbm-setup.sh /dev/nvme0n1p1
 
 # 3. Complete setup (activates hooks)
 sudo /usr/local/sbin/finish-zfs-setup.sh
-
-
-## Quick Install (Existing System)
-
-```bash
-git clone https://github.com/polkamaphone/cachyos-zfs-setup.git
-cd cachyos-zfs-setup
-sudo ./install.sh
-
-
