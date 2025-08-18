@@ -153,17 +153,27 @@ set_dataset_layout() {
   zpool set bootfs="${BE_DATASET}" "${POOL}"
 }
 
+prune_child_cmdline_props() {
+  local base="${POOL}/ROOT"
+  # Remove property from all children except the root BE
+  mapfile -t kids < <(zfs list -H -o name -r "$base" | grep -v "^${base}$")
+  for ds in "${kids[@]}"; do
+    # Only clear if set
+    if zfs get -H -o value org.zfsbootmenu:commandline "$ds" 2>/dev/null | grep -qv '-' ; then
+      zfs inherit -S org.zfsbootmenu:commandline "$ds" || true
+    fi
+  done
+
+  # Set a clean inheritable default on $POOL/ROOT
+  zfs set org.zfsbootmenu:commandline="${ZBM_KERNEL_CMDLINE:-rw quiet}" "$base"
+}
+
+
 set_zbm_dataset_properties() {
   say "Setting ZBM dataset properties..."
-
-  # Set root prefix on the BE root container
-  zfs set org.zfsbootmenu:rootprefix="root=ZFS=" "${POOL}/ROOT"
-
-  # Set command line on the specific boot environment
-  zfs set org.zfsbootmenu:commandline="${ZBM_KERNEL_CMDLINE}" "${BE_DATASET}"
-
-  # Inherit the root prefix (this ensures it gets the root=ZFS= from parent)
-  zfs inherit org.zfsbootmenu:rootprefix "${BE_DATASET}"
+  "${ZBM_KERNEL_CMDLINE:=quiet loglevel=0 nowatchdog}"
+  # Set once at ROOT; BEs inherit (can override per-BE when needed)
+  zfs set org.zfsbootmenu:commandline="${ZBM_KERNEL_CMDLINE}" "${POOL}/ROOT"
 
   say "ZBM dataset properties configured"
 }
@@ -229,6 +239,56 @@ ensure_mkinitcpio_has_zfs() {
   [[ -w /boot ]] || die "/boot is not writable; is it still mounted as ESP? (Should be a ZFS dir)"
   mkinitcpio -P
 }
+
+install_pacman_snapshot_hooks() {
+  # pre-snapshot helper
+  install -D -m 0755 /dev/stdin /usr/local/sbin/zfs-pre-pacman-snapshot.sh <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+POOL=$(zpool list -H -o name | head -n1)
+BOOTFS=$(zpool get -H -o value bootfs "$POOL")
+ts=$(date +%Y%m%d-%H%M%S)
+zfs snapshot "${BOOTFS}@pacman-${ts}"
+SH
+
+  # prune helper (keep last 20)
+  install -D -m 0755 /dev/stdin /usr/local/sbin/zfs-prune-pacman-snapshots.sh <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+KEEP=${KEEP:-20}
+POOL=$(zpool list -H -o name | head -n1)
+BOOTFS=$(zpool get -H -o value bootfs "$POOL")
+zfs list -H -t snapshot -o name -s creation | grep "^${BOOTFS}@pacman-" | head -n -${KEEP} | xargs -r -n1 zfs destroy
+SH
+
+  # hooks
+  install -D -m 0644 /dev/stdin /etc/pacman.d/hooks/00-zfs-pre-snapshot.hook <<'HOOK'
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Package
+Target = *
+[Action]
+Description = ZFS snapshot of root BE (pre-transaction)
+When = PreTransaction
+Exec = /usr/bin/env BATCH_WINDOW=5 /usr/local/sbin/zfs-pre-pacman-snapshot.sh
+HOOK
+
+  install -D -m 0644 /dev/stdin /etc/pacman.d/hooks/99-zfs-prune-snapshots.hook <<'HOOK'
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Package
+Target = *
+[Action]
+Description = Prune old ZFS pacman snapshots (keep last 20)
+When = PostTransaction
+Exec = /usr/bin/env KEEP=20 /usr/local/sbin/zfs-prune-pacman-snapshots.sh
+HOOK
+}
+
 
 write_zbm_config() {
   say "Writing /etc/zfsbootmenu/config.yaml…"
@@ -467,6 +527,20 @@ ensure_kernel_files_synced() {
   say "✓ Kernel files synced"
 }
 
+verify_be_boot_assets() {
+  local ds="$1"
+  local mnt
+  mnt="$(mktemp -d)"
+  mount -t zfs "$ds" "$mnt"
+  if ! (ls "$mnt/boot" | grep -Eq '(^vmlinuz|^linux|^Image|\.efi$)' && \
+        ls "$mnt/boot" | grep -Eq '(^initramfs-|^initrd-|\.efi$)'); then
+    umount "$mnt"; rmdir "$mnt"
+    die "BE $ds lacks kernel/initramfs in /boot"
+  fi
+  umount "$mnt"; rmdir "$mnt"
+}
+
+
 final_checks() {
   say "Quick status:"
   findmnt -no FSTYPE,SOURCE,TARGET /
@@ -485,9 +559,11 @@ main() {
   move_esp_to_efi_if_needed
   maybe_persist_esp_mount
   set_dataset_layout
+  prune_child_cmdline_props
   set_zbm_dataset_properties
   ensure_kernel_files_in_boot
   ensure_mkinitcpio_has_zfs
+  install_pacman_snapshot_hooks
   write_zbm_config
   write_post_hook_rename
   write_post_hook_ensure_kernels
@@ -496,6 +572,7 @@ main() {
   generate_zbm_images
   create_uefi_entry_if_missing
   ensure_kernel_files_synced
+  verify_be_boot_assets
   final_checks
   if [[ "${PERSISTENT_ESP}" != "true" ]]; then
     say "Un-mounting ESP (ZBM will mount it on demand)…"
