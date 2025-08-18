@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 USER_HOME="/home/$SUDO_USER"
 
 # Configuration defaults
-: "${USE_SYSTEMD_BOOT_FALLBACK:=true}"
+: "${USE_SYSTEMD_BOOT_FALLBACK:=false}"
 : "${SNAPSHOT_KEEP:=20}"
 : "${KERNEL_BASENAME:=linux-cachyos}"
 
