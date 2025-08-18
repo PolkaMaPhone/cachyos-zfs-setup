@@ -171,8 +171,9 @@ prune_child_cmdline_props() {
 
 set_zbm_dataset_properties() {
   say "Setting ZBM dataset properties..."
-  "${ZBM_KERNEL_CMDLINE:=quiet loglevel=0 nowatchdog}"
-  # Set once at ROOT; BEs inherit (can override per-BE when needed)
+
+  ZBM_KERNEL_CMDLINE="${ZBM_KERNEL_CMDLINE:-quiet loglevel=0 nowatchdog}"
+
   zfs set org.zfsbootmenu:commandline="${ZBM_KERNEL_CMDLINE}" "${POOL}/ROOT"
 
   say "ZBM dataset properties configured"
