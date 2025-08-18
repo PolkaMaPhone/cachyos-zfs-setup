@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# esp-validate - basic sanity checks for ESP device input
+# Usage: esp-validate [/dev/sdXn]
+
+set -euo pipefail
+
+ESP_DEV="${1:-}"
+
+if [[ -z "$ESP_DEV" ]]; then
+  echo "[esp-validate] No ESP device specified; skipping validation" >&2
+  exit 0
+fi
+
+if [[ ! -e "$ESP_DEV" ]]; then
+  echo "[esp-validate] WARNING: $ESP_DEV does not exist" >&2
+  exit 0
+fi
+
+if [[ ! -b "$ESP_DEV" ]]; then
+  echo "[esp-validate] WARNING: $ESP_DEV is not a block device" >&2
+  exit 0
+fi
+
+fstype=$(lsblk -no FSTYPE "$ESP_DEV" 2>/dev/null || true)
+partlabel=$(lsblk -no PARTLABEL "$ESP_DEV" 2>/dev/null || true)
+if [[ "$fstype" != "vfat" ]] || [[ -n "$partlabel" && ! "$partlabel" =~ [Ee][Ff][Ii] ]]; then
+  echo "[esp-validate] WARNING: $ESP_DEV does not appear to be an EFI System Partition (FSTYPE=$fstype PARTLABEL=$partlabel)" >&2
+fi
