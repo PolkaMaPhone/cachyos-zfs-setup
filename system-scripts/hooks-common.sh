@@ -79,13 +79,14 @@ EOF
 
 install_prune_snapshots_hook() {
     install -d /usr/local/sbin /etc/pacman.d/hooks
+    local BE_EXPR='${BE}'
     cat >/usr/local/sbin/zfs-prune-pacman-snapshots.sh <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 KEEP=\${KEEP:-${SNAPSHOT_KEEP}}
 BE="\$(findmnt -no SOURCE /)"
 [[ -z "\$BE" ]] && exit 1
-mapfile -t snaps < <(zfs list -H -t snapshot -o name -s creation | grep "^\\${BE}@pacman-")
+mapfile -t snaps < <(zfs list -H -t snapshot -o name -s creation | grep "^${BE_EXPR}@pacman-")
 if (( \${#snaps[@]} > KEEP )); then
     del_count=\$(( \${#snaps[@]} - KEEP ))
     printf "%s\n" "\${snaps[@]:0:del_count}" | xargs -r -n1 zfs destroy
