@@ -23,8 +23,8 @@ set -euo pipefail
 : "${BE_DATASET:=zpcachyos/ROOT/cos/root}"
 : "${KERNEL_BASENAME:=linux-cachyos}"
 : "${ESP_DEV:=}"                      # e.g. /dev/nvme0n1p1 (supply via args if empty)
-: "${USE_SYSTEMD_BOOT_FALLBACK:=false}"
-: "${PERSISTENT_ESP:=false}"
+: "${USE_SYSTEMD_BOOT_FALLBACK:=true}"
+: "${PERSISTENT_ESP:=true}"
 : "${EFI_DIR:=/efi}"
 : "${ZBM_EFI_PATH:=/efi/EFI/ZBM}"
 : "${ZBM_TIMEOUT:=5}"
