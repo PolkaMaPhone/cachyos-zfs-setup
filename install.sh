@@ -91,12 +91,6 @@ install_fish_config() {
 install_system_scripts() {
     say "Installing system scripts..."
 
-    # Copy helper scripts (excluding pacman hooks)
-    if [[ -d "$SCRIPT_DIR/system-scripts/snapshot-scripts" ]]; then
-        cp "$SCRIPT_DIR/system-scripts/snapshot-scripts/"*.sh /usr/local/sbin/ 2>/dev/null || true
-        chmod +x /usr/local/sbin/zfs-*.sh 2>/dev/null || true
-    fi
-
     # Copy systemd units
     cp "$SCRIPT_DIR/system-scripts/systemd-units/"* /etc/systemd/system/
     systemctl daemon-reload
