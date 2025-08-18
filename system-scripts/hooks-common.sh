@@ -6,6 +6,7 @@ set -euo pipefail
 : "${KERNEL_BASENAME:=linux-cachyos}"
 : "${SNAPSHOT_KEEP:=20}"
 : "${BATCH_WINDOW:=3}"
+: "${ESP_DEV:=}"
 
 install_pre_snapshot_hook() {
     install -d /usr/local/sbin /etc/pacman.d/hooks
@@ -176,7 +177,7 @@ Target = ${KERNEL_BASENAME}
 
 [Action]
 When = PostTransaction
-Exec = /usr/bin/env ESP_DEV=${ESP_DEV} /usr/local/sbin/copy-kernel-to-esp.sh
+  Exec = /usr/bin/env ESP_DEV=${ESP_DEV:-} /usr/local/sbin/copy-kernel-to-esp.sh
 Description = Mirror kernel/initramfs to ESP and ensure in /boot
 EOF
 }
