@@ -31,6 +31,9 @@ set -euo pipefail
 : "${ZBM_KERNEL_CMDLINE:=rw quiet}"
 # ─────────────────────────────────────────────────────────────────────────────
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/hooks-common.sh"
+
 say() { printf "\033[1;32m[zbm-setup]\033[0m %s\n" "$*"; }
 warn(){ printf "\033[1;33m[zbm-setup]\033[0m %s\n" "$*"; }
 die() { printf "\033[1;31m[zbm-setup]\033[0m %s\n" "$*" >&2; exit 1; }
@@ -267,76 +270,6 @@ add_dracutmodules+=" zfs zfsbootmenu "
 EOF
 }
 
-write_pre_snapshot_hook() {
-  say "Updating pre-snapshot hook to always include kernels..."
-
-  # Override the existing hook to ensure /boot has kernels BEFORE snapshot
-  cat >/usr/local/sbin/zfs-pre-pacman-snapshot.sh <<'SH'
-#!/usr/bin/env bash
-# Enhanced snapshot script that ensures kernels are in /boot before snapshotting
-set -euo pipefail
-
-BATCH_WINDOW="${BATCH_WINDOW:-3}"
-BE="$(findmnt -no SOURCE /)"
-
-if [[ -z "$BE" ]]; then
-  echo "[zfs-pre-snap] Could not detect root dataset" >&2
-  exit 1
-fi
-
-# CRITICAL: Ensure kernel files are in /boot BEFORE taking snapshot
-# This makes all snapshots immediately bootable when cloned
-if [[ ! -f /boot/vmlinuz-linux-cachyos ]]; then
-  echo "[zfs-pre-snap] Ensuring kernel files in /boot before snapshot..."
-
-  # Try to copy from ESP
-  if [[ -f /efi/vmlinuz-linux-cachyos ]]; then
-    cp /efi/vmlinuz-linux-cachyos /boot/
-    cp /efi/initramfs-linux-cachyos*.img /boot/ 2>/dev/null || true
-    [[ -f /efi/amd-ucode.img ]] && cp /efi/amd-ucode.img /boot/
-    [[ -f /efi/intel-ucode.img ]] && cp /efi/intel-ucode.img /boot/
-  else
-    # Last resort: reinstall kernel package
-    echo "[zfs-pre-snap] Reinstalling kernel package to populate /boot..."
-    pacman -S --noconfirm linux-cachyos
-  fi
-fi
-
-# Check for recent snapshots to avoid spam
-RECENT_SNAP=$(zfs list -H -t snapshot -o name,creation -s creation -r "$BE" 2>/dev/null | \
-  grep "@pacman-" | tail -1 || true)
-
-if [[ -n "$RECENT_SNAP" ]]; then
-  SNAP_NAME=$(echo "$RECENT_SNAP" | awk '{print $1}')
-  SNAP_TIME=$(echo "$RECENT_SNAP" | awk '{$1=""; print $0}' | sed 's/^ *//')
-
-  SNAP_EPOCH=$(date -d "$SNAP_TIME" +%s 2>/dev/null || echo "0")
-  CURRENT_EPOCH=$(date +%s)
-  WINDOW_SECONDS=$((BATCH_WINDOW * 60))
-
-  if [[ $SNAP_EPOCH -gt 0 ]] && [[ $((CURRENT_EPOCH - SNAP_EPOCH)) -lt $WINDOW_SECONDS ]]; then
-    AGE_SEC=$(( CURRENT_EPOCH - SNAP_EPOCH ))
-    echo "[zfs-pre-snap] Recent snapshot exists (${AGE_SEC}s ago), skipping"
-    exit 0
-  fi
-fi
-
-# Create snapshot with kernel files already in place
-STAMP="$(date +%Y%m%d-%H%M%S)"
-TAG="pacman-${STAMP}"
-
-echo "[zfs-pre-snap] Creating snapshot ${BE}@${TAG}"
-zfs snapshot "${BE}@${TAG}"
-zfs set custom:pacman_version="$(pacman -Q pacman | cut -d' ' -f2)" "${BE}@${TAG}"
-zfs set custom:kernel_version="$(uname -r)" "${BE}@${TAG}"
-zfs set custom:package_count="$(pacman -Q | wc -l)" "${BE}@${TAG}"
-
-echo "[zfs-pre-snap] Snapshot created with kernel files included"
-exit 0
-SH
-  chmod +x /usr/local/sbin/zfs-pre-pacman-snapshot.sh
-}
-
 write_post_hook_rename() {
   say "Writing post-hook to create stable UKI filenames..."
   cat >/etc/zfsbootmenu/generate-zbm.post.d/10-rename-uki.sh <<'SH'
@@ -369,78 +302,6 @@ log "Setting new stable: $(basename "$NEW_MAIN") -> ZFSBootMenu.EFI"
 mv -f "$NEW_MAIN" "${ESP_DIR}/ZFSBootMenu.EFI"
 SH
   chmod +x /etc/zfsbootmenu/generate-zbm.post.d/10-rename-uki.sh
-}
-
-write_generate_zbm_hook() {
-  say "Installing pacman hook to rebuild ZBM after kernel updates…"
-  cat >/etc/pacman.d/hooks/90-generate-zbm.hook <<HOOK
-[Trigger]
-Operation = Install
-Operation = Upgrade
-Type = Package
-Target = ${KERNEL_BASENAME}
-
-[Action]
-When = PostTransaction
-Exec = /usr/bin/generate-zbm
-Description = Rebuild ZFSBootMenu UKI after ${KERNEL_BASENAME} updates
-HOOK
-}
-
-write_copy_to_esp_bits() {
-  say "Adding helper + hook to keep kernels on ESP..."
-
-  cat >/usr/local/sbin/copy-kernel-to-esp.sh <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-ESP=${ESP:-/efi}
-ESP_DEV=${ESP_DEV:-}
-K=/boot/vmlinuz-linux-cachyos
-I=/boot/initramfs-linux-cachyos.img
-
-# ALWAYS keep kernels in /boot for snapshots to include them
-if [[ -f "$K" ]]; then
-  echo "[copy-kernel] Ensuring kernels in /boot for future snapshots"
-else
-  echo "[copy-kernel] WARNING: No kernel in /boot - future snapshots won't be bootable!"
-fi
-
-mkdir -p "$ESP"
-mounted_before=false
-
-if ! findmnt -no FSTYPE "$ESP" 2>/dev/null | grep -qx 'vfat'; then
-  if [[ -n "$ESP_DEV" ]]; then
-    echo "[copy-kernel] Mounting $ESP_DEV at $ESP"
-    mount -t vfat "$ESP_DEV" "$ESP" || { echo "[copy-kernel] mount failed"; exit 0; }
-    mounted_before=true
-  else
-    echo "[copy-kernel] $ESP not mounted and ESP_DEV not set; skipping."
-    exit 0
-  fi
-fi
-
-[[ -f "$K" ]] && install -m0644 "$K" "$ESP/"
-[[ -f "$I" ]] && install -m0644 "$I" "$ESP/"
-[[ -f /boot/amd-ucode.img   ]] && install -m0644 /boot/amd-ucode.img   "$ESP/"
-[[ -f /boot/intel-ucode.img ]] && install -m0644 /boot/intel-ucode.img "$ESP/"
-
-$mounted_before && umount "$ESP" || true
-exit 0
-SH
-  chmod +x /usr/local/sbin/copy-kernel-to-esp.sh
-
-  cat >/etc/pacman.d/hooks/10-copy-kernel-to-esp.hook <<HOOK
-[Trigger]
-Operation = Install
-Operation = Upgrade
-Type = Package
-Target = linux-cachyos
-
-[Action]
-When = PostTransaction
-Exec = /usr/bin/env ESP_DEV=${ESP_DEV} /usr/local/sbin/copy-kernel-to-esp.sh
-Description = Mirror kernel/initramfs to ESP and ensure in /boot
-HOOK
 }
 
 generate_zbm_images() {
@@ -522,10 +383,10 @@ main() {
   ensure_mkinitcpio_has_zfs
   write_zbm_config
   write_dracut_conf
-  write_pre_snapshot_hook
+  install_pre_snapshot_hook
   write_post_hook_rename
-  write_generate_zbm_hook
-  write_copy_to_esp_bits
+  install_generate_zbm_hook
+  install_copy_kernel_to_esp_hook
   ensure_initial_kernels_everywhere
   generate_zbm_images
   create_uefi_entry_if_missing
