@@ -347,6 +347,11 @@ main() {
     echo "   ZFS + ZFSBootMenu Setup Validator"
     echo "═══════════════════════════════════════"
 
+    if [[ $EUID -ne 0 ]]; then
+        printf "${RED}✗ This script must be run as root (use sudo)${NC}\n" >&2
+        exit 1
+    fi
+
     header "Core System"
     ROOT_DATASET=$(check_root_on_zfs)
     check_boot_directory
