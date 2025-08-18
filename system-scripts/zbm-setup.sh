@@ -153,6 +153,21 @@ set_dataset_layout() {
   zpool set bootfs="${BE_DATASET}" "${POOL}"
 }
 
+set_zbm_dataset_properties() {
+  say "Setting ZBM dataset properties..."
+
+  # Set root prefix on the BE root container
+  zfs set org.zfsbootmenu:rootprefix="root=ZFS=" "${POOL}/ROOT"
+
+  # Set command line on the specific boot environment
+  zfs set org.zfsbootmenu:commandline="${ZBM_KERNEL_CMDLINE}" "${BE_DATASET}"
+
+  # Inherit the root prefix (this ensures it gets the root=ZFS= from parent)
+  zfs inherit org.zfsbootmenu:rootprefix "${BE_DATASET}"
+
+  say "ZBM dataset properties configured"
+}
+
 ensure_mkinitcpio_has_zfs() {
   say "Ensuring mkinitcpio HOOKS includes 'zfs' before 'filesystems'…"
   local cfg=/etc/mkinitcpio.conf
@@ -354,6 +369,7 @@ main() {
   move_esp_to_efi_if_needed
   maybe_persist_esp_mount
   set_dataset_layout
+  set_zbm_dataset_properties
   ensure_mkinitcpio_has_zfs
   write_zbm_config
   write_post_hook_rename
