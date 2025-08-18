@@ -59,12 +59,10 @@ function zfs-cleanup --description 'Clean up test and temporary ZFS datasets'
 
         for snapshot in (zfs list -H -t snapshot -o name -r $root_dataset | grep '@pacman-')
             set temp_mount (mktemp -d)
-            # Arch-based systems require the zfsutil option when mounting
-            # snapshots via mount(8). Without it, mount returns a "bad usage"
-            # error and fails to mount the snapshot for inspection. Include
-            # zfsutil alongside the read-only flag so we can properly scan
-            # snapshot contents across different environments.
-            if mount -t zfs -o ro,zfsutil $snapshot $temp_mount >/dev/null ^/dev/null
+            # Use zfs mount directly to avoid "bad usage" errors from
+            # mount(8) when inspecting snapshots. This handles any required
+            # options such as zfsutil automatically.
+            if zfs mount -o ro $snapshot $temp_mount >/dev/null ^/dev/null
                 if not ls $temp_mount/boot/vmlinuz-* >/dev/null ^/dev/null
                     if set -q _flag_dry_run
                         set items_to_delete $items_to_delete $snapshot
@@ -75,7 +73,7 @@ function zfs-cleanup --description 'Clean up test and temporary ZFS datasets'
                         end
                     end
                 end
-                umount $temp_mount >/dev/null ^/dev/null
+                zfs umount $temp_mount >/dev/null ^/dev/null
             end
             rm -rf $temp_mount
         end
