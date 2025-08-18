@@ -312,8 +312,18 @@ create_uefi_entry_if_missing() {
     say "ZFSBootMenu NVRAM entry already present."
   else
     local disk partnum
-    disk="/dev/$(lsblk -no PKNAME "${ESP_DEV}")"
-    partnum="$(lsblk -no PARTNUM "${ESP_DEV}")"
+
+    # More robust partition number detection
+    if command -v lsblk >/dev/null && lsblk --help 2>&1 | grep -q PARTNUM; then
+      # New lsblk with PARTNUM support
+      disk="/dev/$(lsblk -no PKNAME "${ESP_DEV}")"
+      partnum="$(lsblk -no PARTNUM "${ESP_DEV}")"
+    else
+      # Fallback: extract partition number from device name
+      disk="${ESP_DEV%[0-9]*}"  # Remove trailing numbers
+      partnum="${ESP_DEV##*[!0-9]}"  # Extract trailing numbers
+    fi
+
     efibootmgr -c -d "${disk}" -p "${partnum}" \
       -L "ZFSBootMenu" -l '\EFI\ZBM\ZFSBootMenu.EFI'
     say "Created UEFI entry: ZFSBootMenu"
