@@ -38,12 +38,16 @@ function zfs-be-test-clone --description 'Create test boot environment from late
     end
 
     if test $status -eq 0
-	set -l mnt (mktemp -d)
-        if sudo mount -t zfs $clone_name $mnt
+        set -l be_root "$ZFS_BE_ROOT/$test_name/root"
+        set -l mnt (mktemp -d)
+        set -l orig_mountpoint (zfs get -H -o value mountpoint $be_root)
+        sudo zfs set mountpoint=$mnt $be_root
+        if sudo zfs mount $be_root
             sudo rm -f $mnt/var/lib/pacman/db.lck
-            sudo umount $mnt
+            sudo zfs umount $be_root
         end
-        rmdir $mnt   
+        sudo zfs set mountpoint=$orig_mountpoint $be_root
+        rmdir $mnt
         echo "Test BE created: $test_name"
         echo "To clean up later: sudo zfs destroy -r $ZFS_BE_ROOT/$test_name"
     end
