@@ -1,100 +1,79 @@
 #!/bin/bash
-# CachyOS ZFS Setup - Main installer
-# Optimized to prevent unbootable snapshots during initial setup
+# CachyOS ZFS Setup - Main installer (Optimized)
+# Simplified with embedded hooks and streamlined logic
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 USER_HOME="/home/$SUDO_USER"
 
+# Configuration defaults
+: "${USE_SYSTEMD_BOOT_FALLBACK:=true}"
+: "${SNAPSHOT_KEEP:=20}"
+: "${KERNEL_BASENAME:=linux-cachyos}"
+
 echo "=== CachyOS ZFS Setup Installation ==="
-# Stage pacman hook assets to a fixed location so finish script is repo-agnostic
-stage_pacman_hooks() {
-    local REPO_ROOT="$SCRIPT_DIR"
-    local SRC_DIR="$REPO_ROOT/system-scripts/pacman-hooks"
-    local DATA_DIR="/usr/local/share/cachyos-zfs-setup/pacman-hooks"
 
-    install -d "$DATA_DIR"
-    if [[ -d "$SRC_DIR" ]]; then
-        install -m 0644 "$SRC_DIR"/*.hook "$DATA_DIR"/
-        echo "Staged pacman hooks to $DATA_DIR"
-    else
-        echo "Warning: $SRC_DIR not found; pacman hooks will need to be supplied later"
-    fi
-}
+# Utility functions
+say() { printf "\033[1;32m[install]\033[0m %s\n" "$*"; }
+warn() { printf "\033[1;33m[install]\033[0m %s\n" "$*"; }
+die() { printf "\033[1;31m[install]\033[0m %s\n" "$*" >&2; exit 1; }
 
+# Unified kernel management function
+ensure_kernels() {
+    local target="${1:-/boot}"
+    local kernel_file="$target/vmlinuz-${KERNEL_BASENAME}"
 
-# Function to ensure kernels are in /boot BEFORE hooks are active
-ensure_kernels_in_boot() {
-    echo "Ensuring kernel files are in /boot before enabling hooks..."
+    # Skip if already present
+    [[ -f "$kernel_file" ]] && return 0
 
-    # Check if kernels are already in /boot
-    if [[ -f /boot/vmlinuz-linux-cachyos ]]; then
-        echo "✓ Kernel files already in /boot"
-        return 0
-    fi
+    say "Ensuring kernel files in $target..."
 
-    # Try to copy from ESP first
-    for esp_dir in /efi /boot/efi; do
-        if [[ -f "$esp_dir/vmlinuz-linux-cachyos" ]]; then
-            echo "Copying kernel files from $esp_dir to /boot..."
-            cp "$esp_dir/vmlinuz-linux-cachyos" /boot/
-            cp "$esp_dir/initramfs-linux-cachyos"*.img /boot/ 2>/dev/null || true
-            [[ -f "$esp_dir/amd-ucode.img" ]] && cp "$esp_dir/amd-ucode.img" /boot/
-            [[ -f "$esp_dir/intel-ucode.img" ]] && cp "$esp_dir/intel-ucode.img" /boot/
-            echo "✓ Kernel files copied to /boot"
+    # Try copying from common ESP locations
+    for esp in /efi /boot/efi; do
+        if [[ -f "$esp/vmlinuz-${KERNEL_BASENAME}" ]]; then
+            cp "$esp/vmlinuz-${KERNEL_BASENAME}" "$target/"
+            cp "$esp/initramfs-${KERNEL_BASENAME}"*.img "$target/" 2>/dev/null || true
+            cp "$esp/"*-ucode.img "$target/" 2>/dev/null || true
+            say "✓ Kernel files copied from $esp"
             return 0
         fi
     done
 
-    # If not found, install kernel package
-    echo "Installing kernel package to populate /boot..."
-    pacman -S --noconfirm linux-cachyos
-    echo "✓ Kernel package installed"
+    # Fall back to package installation
+    say "Installing kernel package to populate $target..."
+    pacman -S --noconfirm "${KERNEL_BASENAME}"
+    say "✓ Kernel package installed"
 }
 
-# Function to clean up any unbootable snapshots created during install
 cleanup_unbootable_snapshots() {
-    echo "Checking for unbootable snapshots created during setup..."
+    say "Checking for unbootable snapshots..."
 
     local root_dataset=$(findmnt -no SOURCE / 2>/dev/null || echo "")
-    if [[ -z "$root_dataset" ]]; then
-        echo "Could not detect root dataset, skipping cleanup"
-        return 0
-    fi
+    [[ -z "$root_dataset" ]] && return 0
 
-    # Find snapshots without kernel files (created in last hour)
-    local recent_snapshots=$(zfs list -H -t snapshot -o name,creation -r "$root_dataset" 2>/dev/null | \
-                            grep "@pacman-" | \
-                            awk '{print $1}')
-
-    for snapshot in $recent_snapshots; do
-        # Check if this snapshot has kernel files
-        # We'll mount it temporarily to check
+    local count=0
+    while IFS= read -r snapshot; do
         local temp_mount="/tmp/zfs-check-$$"
         mkdir -p "$temp_mount"
 
         if mount -t zfs -o ro "$snapshot" "$temp_mount" 2>/dev/null; then
-            if [[ ! -f "$temp_mount/boot/vmlinuz-linux-cachyos" ]]; then
-                echo "Found unbootable snapshot: $snapshot"
+            if [[ ! -f "$temp_mount/boot/vmlinuz-${KERNEL_BASENAME}" ]]; then
                 umount "$temp_mount" 2>/dev/null || true
-
-                # Destroy the unbootable snapshot
-                echo "Removing unbootable snapshot: $snapshot"
-                zfs destroy "$snapshot" 2>/dev/null || echo "  Failed to remove (may be in use)"
+                zfs destroy "$snapshot" 2>/dev/null && ((count++)) || true
             else
                 umount "$temp_mount" 2>/dev/null || true
             fi
         fi
 
         rmdir "$temp_mount" 2>/dev/null || true
-    done
+    done < <(zfs list -H -t snapshot -o name -r "$root_dataset" 2>/dev/null | grep "@pacman-")
 
-    echo "✓ Snapshot cleanup complete"
+    [[ $count -gt 0 ]] && say "✓ Removed $count unbootable snapshot(s)" || say "✓ No unbootable snapshots found"
 }
 
 install_fish_config() {
-    echo "Installing Fish shell configuration..."
+    say "Installing Fish shell configuration..."
 
     local fish_config_dir="$USER_HOME/.config/fish"
     sudo -u "$SUDO_USER" mkdir -p "$fish_config_dir/functions"
@@ -103,154 +82,107 @@ install_fish_config() {
     sudo -u "$SUDO_USER" cp "$SCRIPT_DIR/fish-shell/config.fish" "$fish_config_dir/"
     sudo -u "$SUDO_USER" cp "$SCRIPT_DIR/fish-shell/functions/"*.fish "$fish_config_dir/functions/"
 
-    echo "✓ Fish configuration installed"
+    say "✓ Fish configuration installed"
 }
 
 install_system_scripts() {
-    echo "Installing system scripts..."
+    say "Installing system scripts..."
 
-    # Copy snapshot scripts FIRST (but don't activate hooks yet)
-    cp "$SCRIPT_DIR/system-scripts/snapshot-scripts/"*.sh /usr/local/sbin/
-    chmod +x /usr/local/sbin/zfs-*.sh
-
-    # Ensure hooks directory exists
-    mkdir -p /etc/pacman.d/hooks
+    # Copy helper scripts (excluding pacman hooks)
+    if [[ -d "$SCRIPT_DIR/system-scripts/snapshot-scripts" ]]; then
+        cp "$SCRIPT_DIR/system-scripts/snapshot-scripts/"*.sh /usr/local/sbin/ 2>/dev/null || true
+        chmod +x /usr/local/sbin/zfs-*.sh 2>/dev/null || true
+    fi
 
     # Copy systemd units
     cp "$SCRIPT_DIR/system-scripts/systemd-units/"* /etc/systemd/system/
     systemctl daemon-reload
 
-    # Copy other scripts
-    cp "$SCRIPT_DIR/system-scripts/copy-kernel-to-esp.sh" /usr/local/sbin/ 2>/dev/null || true
-    cp "$SCRIPT_DIR/system-scripts/zbm-sync-be-kernel.sh" /usr/local/sbin/ 2>/dev/null || true
-    chmod +x /usr/local/sbin/*.sh
-
-    echo "✓ System scripts installed (hooks not yet activated)"
+    say "✓ System scripts installed"
 }
 
-install_pacman_hooks() {
-    echo "Installing pacman hooks..."
+install_embedded_hooks() {
+    say "Installing pacman hooks..."
 
-    # NOW install the hooks after kernels are in place
-    cp "$SCRIPT_DIR/system-scripts/pacman-hooks/"*.hook /etc/pacman.d/hooks/
+    install -d /etc/pacman.d/hooks
+    install -d /usr/local/sbin
 
-    echo "✓ Pacman hooks installed and active"
-}
-
-enable_zfs_automation() {
-    echo "Enabling ZFS automation..."
-
-    # Enable scrub timer for main pool (assumes zpcachyos)
-    systemctl enable --now zpool-scrub@zpcachyos.timer 2>/dev/null || \
-        echo "  Note: zpool-scrub timer not enabled (pool may not exist yet)"
-
-    echo "✓ ZFS automation enabled"
-    echo "  - Monthly pool scrubs: systemctl status zpool-scrub@zpcachyos.timer"
-    echo "  - Pacman snapshot hooks: ls /etc/pacman.d/hooks/*zfs*"
-}
-
-set_fish_default() {
-    echo "Setting Fish as default shell..."
-
-    if [[ "$SUDO_USER" != "root" ]] && ! grep -q "/usr/bin/fish" /etc/passwd | grep "$SUDO_USER"; then
-        chsh -s /usr/bin/fish "$SUDO_USER"
-        echo "✓ Fish set as default shell for $SUDO_USER"
-    else
-        echo "✓ Fish already default or user is root"
-    fi
-}
-
-detect_setup_stage() {
-    # Detect if we're in initial setup or post-ZBM setup
-    if [[ -f /etc/zfsbootmenu/config.yaml ]]; then
-        echo "detected"
-        return 0
-    else
-        echo "not-detected"
-        return 1
-    fi
-}
-
-
-install_embedded_pacman_hooks() {
-  echo "Installing embedded pacman hooks and helper scripts..."
-
-  install -d /etc/pacman.d/hooks
-  install -d /usr/local/sbin
-
-  # --- Helper: pre-transaction snapshot (skips if BE not bootable) ---
-  cat >/usr/local/sbin/zfs-pre-pacman-snapshot.sh <<'H_SH'
+    # Optimized pre-snapshot hook
+    cat >/usr/local/sbin/zfs-pre-pacman-snapshot.sh <<'HOOK_SH'
 #!/usr/bin/env bash
 set -euo pipefail
-POOL=$(zpool list -H -o name | head -n1)
-BOOTFS=$(zpool get -H -o value bootfs "$POOL")
-MNT=$(mktemp -d)
-trap 'umount -lf "$MNT" >/dev/null 2>&1 || true; rmdir "$MNT" >/dev/null 2>&1 || true' EXIT
 
-# Try to mount; OK if already mounted elsewhere
-mount -t zfs "$BOOTFS" "$MNT" >/dev/null 2>&1 || true
+BE="$(findmnt -no SOURCE /)"
+[[ -z "$BE" ]] && exit 1
 
-shopt -s nullglob
-kernels=( "$MNT"/boot/vmlinuz* "$MNT"/boot/linux* "$MNT"/boot/Image* )
-inits=( "$MNT"/boot/initramfs-* "$MNT"/boot/initrd-* )
-ukis=( "$MNT"/boot/*.efi )
-shopt -u nullglob
-
-if (( ${#ukis[@]} > 0 )) || (( ${#kernels[@]} > 0 && ${#inits[@]} > 0 )); then
-  ts=$(date +%Y%m%d-%H%M%S)
-  zfs snapshot "${BOOTFS}@pacman-${ts}"
-else
-  echo "[zfs-pre-pacman-snapshot] Skipping: BE lacks kernel assets" >&2
+# Ensure kernels exist before snapshot
+if [[ ! -f /boot/vmlinuz-linux-cachyos ]]; then
+    for esp in /efi /boot/efi; do
+        if [[ -f "$esp/vmlinuz-linux-cachyos" ]]; then
+            cp "$esp"/vmlinuz* "$esp"/initramfs* /boot/ 2>/dev/null
+            break
+        fi
+    done || pacman -S --noconfirm linux-cachyos
 fi
-H_SH
-  chmod 0755 /usr/local/sbin/zfs-pre-pacman-snapshot.sh
 
-  # --- Helper: prune old pacman snapshots (keep last 20) ---
-  cat >/usr/local/sbin/zfs-prune-pacman-snapshots.sh <<'H_SH'
-#!/usr/bin/env bash
-set -euo pipefail
-KEEP=${KEEP:-20}
-POOL=$(zpool list -H -o name | head -n1)
-BOOTFS=$(zpool get -H -o value bootfs "$POOL")
-mapfile -t snaps < <(zfs list -H -t snapshot -o name -s creation | grep "^${BOOTFS}@pacman-")
-if (( ${#snaps[@]} > KEEP )); then
-  del_count=$(( ${#snaps[@]} - KEEP ))
-  printf "%s\n" "${snaps[@]:0:del_count}" | xargs -r -n1 zfs destroy
+# Skip if recent snapshot exists (within 3 minutes)
+LAST=$(zfs list -Hp -t snapshot -o name,creation "$BE" 2>/dev/null | grep '@pacman-' | tail -1)
+if [[ -n "$LAST" ]]; then
+    AGE=$(($(date +%s) - $(echo "$LAST" | awk '{print $2}')))
+    [[ $AGE -lt 180 ]] && exit 0
 fi
-H_SH
-  chmod 0755 /usr/local/sbin/zfs-prune-pacman-snapshots.sh
 
-  # --- Optional helper: copy kernel/initramfs to ESP (fallback) ---
-  if [[ "${USE_SYSTEMD_BOOT_FALLBACK:-true}" == "true" ]]; then
-    cat >/usr/local/sbin/copy-kernel-to-esp.sh <<'H_SH'
+# Create snapshot
+TAG="pacman-$(date +%Y%m%d-%H%M%S)"
+zfs snapshot "${BE}@${TAG}"
+echo "[zfs-pre-snap] Created snapshot: ${BE}@${TAG}"
+HOOK_SH
+    chmod 0755 /usr/local/sbin/zfs-pre-pacman-snapshot.sh
+
+    # Prune snapshots hook
+    cat >/usr/local/sbin/zfs-prune-pacman-snapshots.sh <<PRUNE_SH
 #!/usr/bin/env bash
 set -euo pipefail
+KEEP=\${KEEP:-${SNAPSHOT_KEEP}}
+BE="\$(findmnt -no SOURCE /)"
+[[ -z "\$BE" ]] && exit 1
+
+mapfile -t snaps < <(zfs list -H -t snapshot -o name -s creation | grep "^\${BE}@pacman-")
+if (( \${#snaps[@]} > KEEP )); then
+    del_count=\$(( \${#snaps[@]} - KEEP ))
+    printf "%s\n" "\${snaps[@]:0:del_count}" | xargs -r -n1 zfs destroy
+    echo "[zfs-prune] Removed \$del_count old snapshot(s)"
+fi
+PRUNE_SH
+    chmod 0755 /usr/local/sbin/zfs-prune-pacman-snapshots.sh
+
+    # Optional: Copy kernel to ESP helper
+    if [[ "${USE_SYSTEMD_BOOT_FALLBACK}" == "true" ]]; then
+        cat >/usr/local/sbin/copy-kernel-to-esp.sh <<'COPY_SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
 ESP="${ESP:-/efi}"
-if [[ ! -d "$ESP" ]]; then
-  if mountpoint -q /boot/efi; then ESP=/boot/efi; else
-    echo "[copy-kernel-to-esp] ESP not mounted at /efi or /boot/efi; skipping" >&2
-    exit 0
-  fi
-fi
-mkdir -p "$ESP/EFI/Linux"
-shopt -s nullglob
-bootsrc=( /boot/vmlinuz* /boot/linux* /boot/Image* )
-initsrc=( /boot/initramfs-* /boot/initrd-* )
-ukisrc=( /boot/*.efi )
-shopt -u nullglob
-if (( ${#ukisrc[@]} > 0 )); then
-  cp -f "${ukisrc[@]}" "$ESP/EFI/Linux/"
-elif (( ${#bootsrc[@]} > 0 && ${#initsrc[@]} > 0 )); then
-  cp -f "${bootsrc[@]}" "${initsrc[@]}" "$ESP/EFI/Linux/"
-else
-  echo "[copy-kernel-to-esp] No kernel assets in /boot; skipping" >&2
-fi
-H_SH
-    chmod 0755 /usr/local/sbin/copy-kernel-to-esp.sh
-  fi
+[[ -d "$ESP" ]] || ESP="/boot/efi"
+[[ -d "$ESP" ]] || { echo "[copy-kernel] No ESP found"; exit 0; }
 
-  # --- Hooks ---
-  cat >/etc/pacman.d/hooks/00-zfs-pre-snapshot.hook <<'H_HOOK'
+# Ensure /boot has kernels (for snapshots)
+[[ -f /boot/vmlinuz-linux-cachyos ]] || {
+    [[ -f "$ESP/vmlinuz-linux-cachyos" ]] && \
+        cp "$ESP"/{vmlinuz,initramfs}* /boot/ 2>/dev/null
+}
+
+# Copy to ESP for fallback
+mkdir -p "$ESP/EFI/Linux" 2>/dev/null || true
+for f in /boot/vmlinuz* /boot/initramfs* /boot/*-ucode.img; do
+    [[ -f "$f" ]] && cp -f "$f" "$ESP/" 2>/dev/null || true
+done
+COPY_SH
+        chmod 0755 /usr/local/sbin/copy-kernel-to-esp.sh
+    fi
+
+    # Install pacman hooks
+    cat >/etc/pacman.d/hooks/00-zfs-pre-snapshot.hook <<'HOOK'
 [Trigger]
 Operation = Install
 Operation = Upgrade
@@ -259,12 +191,12 @@ Type = Package
 Target = *
 
 [Action]
-Description = ZFS snapshot of root BE (pre-transaction, only if bootable)
+Description = ZFS snapshot of root BE (pre-transaction)
 When = PreTransaction
 Exec = /usr/local/sbin/zfs-pre-pacman-snapshot.sh
-H_HOOK
+HOOK
 
-  cat >/etc/pacman.d/hooks/99-zfs-prune-snapshots.hook <<'H_HOOK'
+    cat >/etc/pacman.d/hooks/99-zfs-prune-snapshots.hook <<'HOOK'
 [Trigger]
 Operation = Install
 Operation = Upgrade
@@ -273,105 +205,102 @@ Type = Package
 Target = *
 
 [Action]
-Description = Prune old ZFS pacman snapshots (keep last 20)
+Description = Prune old ZFS pacman snapshots
 When = PostTransaction
 Exec = /usr/local/sbin/zfs-prune-pacman-snapshots.sh
-H_HOOK
+HOOK
 
-  cat >/etc/pacman.d/hooks/90-generate-zbm.hook <<'H_HOOK'
+    cat >/etc/pacman.d/hooks/90-generate-zbm.hook <<'HOOK'
 [Trigger]
 Operation = Install
 Operation = Upgrade
 Type = Package
 Target = linux*
-Target = mkinitcpio
-Target = dracut
 Target = zfsbootmenu
 
 [Action]
-Description = Generate ZFSBootMenu EFI images
+Description = Generate ZFSBootMenu images
 When = PostTransaction
-Exec = /usr/bin/bash -lc 'command -v generate-zbm >/dev/null 2>&1 && generate-zbm || true'
-H_HOOK
+Exec = /usr/bin/bash -c 'command -v generate-zbm >/dev/null 2>&1 && generate-zbm || true'
+HOOK
 
-  if [[ "${USE_SYSTEMD_BOOT_FALLBACK:-true}" == "true" ]]; then
-    cat >/etc/pacman.d/hooks/10-copy-kernel-to-esp.hook <<'H_HOOK'
+    if [[ "${USE_SYSTEMD_BOOT_FALLBACK}" == "true" ]]; then
+        cat >/etc/pacman.d/hooks/10-copy-kernel-to-esp.hook <<'HOOK'
 [Trigger]
 Operation = Install
 Operation = Upgrade
 Type = Package
 Target = linux*
-Target = mkinitcpio
-Target = dracut
 
 [Action]
-Description = Mirror kernel/initramfs to ESP (fallback for firmware boot)
+Description = Mirror kernel/initramfs to ESP (systemd-boot fallback)
 When = PostTransaction
 Exec = /usr/local/sbin/copy-kernel-to-esp.sh
-H_HOOK
-  fi
+HOOK
+    fi
 
-  echo "✓ Pacman hooks installed (embedded)"
+    say "✓ Pacman hooks installed"
+}
+
+enable_zfs_automation() {
+    say "Enabling ZFS automation..."
+
+    # Try to detect the pool name if not set
+    local pool="${POOL:-$(zpool list -H -o name 2>/dev/null | head -n1)}"
+
+    if [[ -n "$pool" ]]; then
+        systemctl enable --now "zpool-scrub@${pool}.timer" 2>/dev/null && \
+            say "✓ Monthly scrub enabled for pool: $pool" || \
+            warn "Could not enable scrub timer for pool: $pool"
+    else
+        warn "No ZFS pool detected - scrub timer not enabled"
+    fi
+}
+
+set_fish_default() {
+    say "Setting Fish as default shell..."
+
+    if [[ "$SUDO_USER" != "root" ]] && ! grep -q "/usr/bin/fish" /etc/passwd | grep "$SUDO_USER"; then
+        chsh -s /usr/bin/fish "$SUDO_USER" && \
+            say "✓ Fish set as default shell for $SUDO_USER" || \
+            warn "Could not set Fish as default shell"
+    else
+        say "✓ Fish already default or user is root"
+    fi
 }
 
 main() {
-    # Check we're running as root
-    [[ $EUID -eq 0 ]] || { echo "Error: Run as root (sudo ./install.sh)"; exit 1; }
-    [[ -n "${SUDO_USER:-}" ]] || { echo "Error: Must use sudo, not direct root"; exit 1; }
+    # Validate environment
+    [[ $EUID -eq 0 ]] || die "Run as root (sudo ./install.sh)"
+    [[ -n "${SUDO_USER:-}" ]] || die "Must use sudo, not direct root"
 
-    # Detect installation stage
-    local zbm_configured=$(detect_setup_stage || echo "not-detected")
+    # Core installation
+    install_fish_config
+    install_system_scripts
+    install_embedded_hooks
+    enable_zfs_automation
+    set_fish_default
 
-    if [[ "$zbm_configured" == "detected" ]]; then
-        echo "ZBM already configured - full installation mode"
-
-        # If ZBM is configured, ensure kernels are in /boot first
-        ensure_kernels_in_boot
-
-        # Install everything including hooks
-        install_fish_config
-        install_system_scripts
-        install_pacman_hooks  # Safe to install now
-        enable_zfs_automation
-        set_fish_default
-
-        # Clean up any bad snapshots that might have been created
+    # Post-install cleanup if ZBM is configured
+    if [[ -f /etc/zfsbootmenu/config.yaml ]]; then
+        ensure_kernels /boot
         cleanup_unbootable_snapshots
+    fi
 
-    else
-        echo "ZBM not yet configured - minimal installation mode"
-        echo "Deferring pacman hooks until after ZBM setup"
-
-        # Install everything EXCEPT pacman hooks
-        install_fish_config
-        stage_pacman_hooks
-        install_system_scripts  # Scripts only, no hooks
-        set_fish_default
-
-        # Create a script to finish installation after ZBM setup
-
-        # Install embedded hooks now (safe: pre-snapshot hook skips until bootable)
-        install_embedded_pacman_hooks
-        enable_zfs_automation
-        set_fish_default
-        echo ""
-        echo "=== Hooks installed ==="
-        echo "Pacman hooks are active. The snapshot hook will skip until your BE is bootable."
-fi
-
+    # Summary
     echo ""
-    echo "=== Installation $([ "$zbm_configured" == "detected" ] && echo "Complete" || echo "Partially Complete") ==="
+    say "=== Installation Complete ==="
     echo ""
 
-    if [[ "$zbm_configured" == "detected" ]]; then
+    if [[ -f /etc/zfsbootmenu/config.yaml ]]; then
         echo "Next steps:"
-        echo "1. Log out and back in (or run 'exec fish') to use new shell"
+        echo "1. Log out and back in (or run 'exec fish') to use Fish shell"
         echo "2. Test ZFS functions: 'zfs-config-show'"
-        echo "3. Check automation: 'systemctl list-timers | grep scrub'"
+        echo "3. Verify setup: './validate-setup.sh'"
     else
         echo "Next steps:"
-        echo "1. Run ZBM setup: sudo ./system-scripts/zbm-setup.sh /dev/your-esp-device"
-        echo "2. Reboot and verify ZFSBootMenu shows your BE and snapshots"
+        echo "1. Configure ZFSBootMenu: sudo ./system-scripts/zbm-setup.sh /dev/your-esp-device"
+        echo "2. Verify setup: './validate-setup.sh'"
         echo "3. Log out and back in to use Fish shell"
     fi
 }
