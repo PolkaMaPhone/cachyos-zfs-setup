@@ -18,7 +18,7 @@ Opinionated ZFS setup for CachyOS providing ZFSBootMenu boot environments, autom
 ## Quick start
 Run everything in one shot (replace `/dev/nvme0n1p1` with your ESP device):
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CachyOS/cachyos-zfs-setup/main/all-in-one.sh | sudo bash -s -- /dev/nvme0n1p1
+curl -fsSL https://raw.githubusercontent.com/polkamaphone/cachyos-zfs-setup/main/all-in-one.sh | sudo bash -s -- /dev/nvme0n1p1
 ```
 The script clones this repository, installs helpers, configures ZFSBootMenu and runs validation. If the ESP device looks suspicious, it will warn before proceeding.
 
