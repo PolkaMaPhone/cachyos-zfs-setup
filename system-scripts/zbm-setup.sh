@@ -198,23 +198,35 @@ YAML
 write_post_hooks() {
     say "Installing ZBM post-generation hooks..."
 
-    # Stable filename hook
+    # Stable filename hook - CRITICAL for UEFI boot entry
     cat >/etc/zfsbootmenu/generate-zbm.post.d/10-stable-names.sh <<'HOOK'
 #!/usr/bin/env bash
 set -euo pipefail
 
 ESP_DIR="/efi/EFI/ZBM"
+LOG="/var/log/zfsbootmenu/rename.log"
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+
+# Find the newest generated EFI file
 NEW="$(ls -1t "${ESP_DIR}"/vmlinuz-*.EFI 2>/dev/null | grep -v backup | head -n1)"
 
-[[ -z "$NEW" ]] && exit 0
+if [[ -z "$NEW" ]]; then
+    echo "[zbm-hook] No new EFI files found" | tee -a "$LOG"
+    exit 0
+fi
 
-# Rotate backups
-[[ -f "${ESP_DIR}/ZFSBootMenu.EFI" ]] && \
+# Backup existing if present
+if [[ -f "${ESP_DIR}/ZFSBootMenu.EFI" ]]; then
     mv -f "${ESP_DIR}/ZFSBootMenu.EFI" "${ESP_DIR}/ZFSBootMenu-backup.EFI"
+    echo "[zbm-hook] Backed up existing ZFSBootMenu.EFI" | tee -a "$LOG"
+fi
 
-# Set new stable
+# Create stable filename for UEFI entry
 mv -f "$NEW" "${ESP_DIR}/ZFSBootMenu.EFI"
-echo "[zbm-hook] Updated ZFSBootMenu.EFI"
+echo "[zbm-hook] Created stable: $(basename "$NEW") -> ZFSBootMenu.EFI" | tee -a "$LOG"
+
+# Clean up any other versioned files to save space
+find "${ESP_DIR}" -name "vmlinuz-*.EFI" -mtime +7 -delete 2>/dev/null || true
 HOOK
     chmod +x /etc/zfsbootmenu/generate-zbm.post.d/10-stable-names.sh
 
@@ -238,9 +250,21 @@ sync_kernels_to_esp() {
 generate_zbm_images() {
     say "Generating ZFSBootMenu images..."
 
+    # Ensure generate-zbm exists
+    if ! command -v generate-zbm >/dev/null 2>&1; then
+        die "generate-zbm not found. Install zfsbootmenu package first."
+    fi
+
     if generate-zbm; then
         say "✓ ZBM images generated"
-        ls -lh "${ZBM_EFI_PATH}"/*.EFI 2>/dev/null || true
+
+        # Verify the images exist
+        if [[ -f "${ZBM_EFI_PATH}/ZFSBootMenu.EFI" ]]; then
+            ls -lh "${ZBM_EFI_PATH}"/*.EFI 2>/dev/null || true
+        else
+            warn "ZBM images generated but ZFSBootMenu.EFI not found"
+            warn "Check ${ZBM_EFI_PATH} for generated files"
+        fi
     else
         warn "ZBM generation had warnings - check output"
     fi
@@ -249,25 +273,73 @@ generate_zbm_images() {
 create_uefi_entry() {
     say "Configuring UEFI boot entry..."
 
-    if efibootmgr | grep -q "ZFSBootMenu"; then
+    # Check if we're in UEFI mode
+    if [[ ! -d /sys/firmware/efi ]]; then
+        warn "System not booted in UEFI mode - cannot create boot entry"
+        return 1
+    fi
+
+    # Check for existing entry
+    if efibootmgr -v 2>/dev/null | grep -q "ZFSBootMenu"; then
         say "✓ ZFSBootMenu entry already exists"
+        efibootmgr | grep "ZFSBootMenu"
         return 0
+    fi
+
+    # Verify the EFI file exists
+    if [[ ! -f "${ZBM_EFI_PATH}/ZFSBootMenu.EFI" ]]; then
+        warn "ZFSBootMenu.EFI not found at ${ZBM_EFI_PATH}"
+        warn "Run 'generate-zbm' first to create the boot images"
+        return 1
     fi
 
     # Determine disk and partition
     local disk partnum
+
+    # Method 1: Use lsblk if it supports PARTNUM
     if command -v lsblk >/dev/null && lsblk --help 2>&1 | grep -q PARTNUM; then
         disk="/dev/$(lsblk -no PKNAME "${ESP_DEV}")"
         partnum="$(lsblk -no PARTNUM "${ESP_DEV}")"
     else
-        disk="${ESP_DEV%[0-9]*}"
-        partnum="${ESP_DEV##*[!0-9]}"
+        # Method 2: Parse device name
+        if [[ "$ESP_DEV" =~ ^(/dev/[a-z]+)([0-9]+)$ ]]; then
+            disk="${BASH_REMATCH[1]}"
+            partnum="${BASH_REMATCH[2]}"
+        elif [[ "$ESP_DEV" =~ ^(/dev/nvme[0-9]+n[0-9]+)p([0-9]+)$ ]]; then
+            disk="${BASH_REMATCH[1]}"
+            partnum="${BASH_REMATCH[2]}"
+        else
+            warn "Could not parse partition from $ESP_DEV"
+            return 1
+        fi
     fi
 
-    efibootmgr -c -d "${disk}" -p "${partnum}" \
-        -L "ZFSBootMenu" -l '\EFI\ZBM\ZFSBootMenu.EFI' && \
-        say "✓ Created UEFI entry: ZFSBootMenu" || \
-        warn "Could not create UEFI entry - add manually"
+    say "Creating UEFI entry: disk=$disk partition=$partnum"
+
+    # Create the boot entry
+    if efibootmgr -c -d "${disk}" -p "${partnum}" \
+        -L "ZFSBootMenu" -l '\EFI\ZBM\ZFSBootMenu.EFI' 2>/dev/null; then
+        say "✓ Created UEFI entry: ZFSBootMenu"
+
+        # Show the new entry
+        efibootmgr -v | grep "ZFSBootMenu"
+
+        # Optionally set it as next boot
+        local bootnum=$(efibootmgr | grep "ZFSBootMenu" | sed -n 's/^Boot\([0-9A-F]*\).*/\1/p' | head -n1)
+        if [[ -n "$bootnum" ]]; then
+            say "Boot entry number: $bootnum"
+            say "To boot ZFSBootMenu next: efibootmgr -n $bootnum"
+        fi
+    else
+        warn "Failed to create UEFI entry automatically"
+        echo ""
+        echo "Manual creation command:"
+        echo "  efibootmgr -c -d ${disk} -p ${partnum} -L 'ZFSBootMenu' -l '\\EFI\\ZBM\\ZFSBootMenu.EFI'"
+        echo ""
+        echo "Or if that fails, try:"
+        echo "  efibootmgr -c -d ${disk} -p ${partnum} -L 'ZFSBootMenu' -l '\\EFI\\ZBM\\vmlinuz-linux-cachyos.EFI'"
+        return 1
+    fi
 }
 
 final_summary() {

@@ -15,11 +15,6 @@ PASSED=0
 FAILED=0
 WARNINGS=0
 
-# Global variables to store discovered values
-ROOT_DATASET=""
-ESP_PATH=""
-POOL=""
-
 # Test result functions
 pass() {
     printf "${GREEN}✓${NC} %s\n" "$1"
@@ -45,15 +40,14 @@ header() {
 
 # Core system checks
 check_root_on_zfs() {
-    local fs_type=$(findmnt -no FSTYPE / 2>/dev/null || echo "unknown")
-
-    if [[ "$fs_type" == "zfs" ]]; then
-        ROOT_DATASET=$(findmnt -no SOURCE /)
-        pass "Root on ZFS: $ROOT_DATASET"
+    if findmnt -no FSTYPE / | grep -qx 'zfs'; then
+        local dataset=$(findmnt -no SOURCE /)
+        pass "Root on ZFS: $dataset"
+        echo "$dataset"  # Return for use in other checks
     else
-        fail "Root is not on ZFS (filesystem: $fs_type)"
+        fail "Root is not on ZFS"
+        return 1
     fi
-
 }
 
 check_boot_directory() {
@@ -62,10 +56,8 @@ check_boot_directory() {
     if [[ "$boot_fs" == "zfs" ]] || [[ "$boot_fs" == "none" ]]; then
         if [[ -d /boot ]] && [[ -f /boot/vmlinuz-linux-cachyos ]]; then
             pass "/boot is a directory on ZFS with kernel files"
-        elif [[ -d /boot ]]; then
-            fail "/boot exists but missing kernel files"
         else
-            fail "/boot directory not found"
+            fail "/boot missing kernel files (required for ZBM)"
         fi
     else
         fail "/boot is on $boot_fs (should be on ZFS root dataset)"
@@ -74,66 +66,66 @@ check_boot_directory() {
 
 check_esp_mount() {
     local esp_mounted=false
+    local esp_path=""
 
     for path in /efi /boot/efi; do
         if findmnt -no FSTYPE "$path" 2>/dev/null | grep -qx 'vfat'; then
             esp_mounted=true
-            ESP_PATH="$path"
+            esp_path="$path"
             break
         fi
     done
 
     if [[ "$esp_mounted" == "true" ]]; then
-        local esp_dev=$(findmnt -no SOURCE "$ESP_PATH")
-        pass "ESP mounted at $ESP_PATH ($esp_dev)"
+        local esp_dev=$(findmnt -no SOURCE "$esp_path")
+        pass "ESP mounted at $esp_path ($esp_dev)"
+        echo "$esp_path"  # Return for use in other checks
     else
         warn "ESP not mounted (ZBM can mount on demand)"
-        ESP_PATH=""
+        echo ""
     fi
 }
 
 # ZFS configuration checks
 check_zfs_pool() {
-    POOL=$(zpool list -H -o name 2>/dev/null | head -n1 || echo "")
+    local pool=$(zpool list -H -o name 2>/dev/null | head -n1)
 
-    if [[ -n "$POOL" ]]; then
-        local health=$(zpool get -H -o value health "$POOL" 2>/dev/null || echo "UNKNOWN")
+    if [[ -n "$pool" ]]; then
+        local health=$(zpool get -H -o value health "$pool")
         if [[ "$health" == "ONLINE" ]]; then
-            pass "ZFS pool '$POOL' is ONLINE"
+            pass "ZFS pool '$pool' is ONLINE"
         else
-            warn "ZFS pool '$POOL' health: $health"
+            warn "ZFS pool '$pool' health: $health"
         fi
+        echo "$pool"  # Return pool name
     else
         fail "No ZFS pools found"
+        return 1
     fi
 }
 
 check_bootfs_property() {
-    if [[ -z "$POOL" ]]; then
-        warn "Cannot check bootfs - no pool found"
-        return
-    fi
+    local pool="${1:-}"
+    [[ -z "$pool" ]] && return 1
 
-    local bootfs=$(zpool get -H -o value bootfs "$POOL" 2>/dev/null || echo "-")
-    if [[ "$bootfs" != "-" ]] && [[ "$bootfs" != "" ]]; then
+    local bootfs=$(zpool get -H -o value bootfs "$pool")
+    if [[ "$bootfs" != "-" ]]; then
         pass "Boot filesystem set: $bootfs"
     else
-        fail "No boot filesystem set on pool $POOL"
+        fail "No boot filesystem set on pool $pool"
     fi
 }
 
 check_zbm_properties() {
-    if [[ -z "$ROOT_DATASET" ]]; then
-        warn "Cannot check ZBM properties - root dataset not detected"
-        return
-    fi
+    local root_dataset="${1:-}"
+    [[ -z "$root_dataset" ]] && return 1
 
     # Extract pool and BE root from dataset
-    local pool="${ROOT_DATASET%%/*}"
-    local be_root="${ROOT_DATASET%/root}"
+    local pool="${root_dataset%%/*}"
+    local be_root="${root_dataset%/root}"
 
     # Check rootprefix
-    local rootprefix=$(zfs get -H -o value org.zfsbootmenu:rootprefix "${pool}/ROOT" 2>/dev/null || echo "-")
+    local rootprefix=$(zfs get -H -o value org.zfsbootmenu:rootprefix "${pool}/ROOT" 2>/dev/null || echo "")
     if [[ "$rootprefix" == "root=ZFS=" ]]; then
         pass "ZBM rootprefix configured correctly"
     else
@@ -141,11 +133,11 @@ check_zbm_properties() {
     fi
 
     # Check commandline
-    local cmdline=$(zfs get -H -o value org.zfsbootmenu:commandline "$ROOT_DATASET" 2>/dev/null || echo "-")
+    local cmdline=$(zfs get -H -o value org.zfsbootmenu:commandline "$root_dataset" 2>/dev/null || echo "")
     if [[ -n "$cmdline" ]] && [[ "$cmdline" != "-" ]]; then
         pass "ZBM commandline set: $cmdline"
     else
-        warn "No ZBM commandline on $ROOT_DATASET"
+        warn "No ZBM commandline on $root_dataset"
     fi
 }
 
@@ -155,28 +147,24 @@ check_zbm_config() {
         pass "ZBM config exists: /etc/zfsbootmenu/config.yaml"
 
         # Check key settings
-        if grep -q "BootMountPoint:" /etc/zfsbootmenu/config.yaml 2>/dev/null; then
+        if grep -q "BootMountPoint:" /etc/zfsbootmenu/config.yaml; then
             local mount=$(grep "BootMountPoint:" /etc/zfsbootmenu/config.yaml | awk '{print $2}' | tr -d '"')
-            if [[ -n "$mount" ]]; then
-                pass "ZBM boot mount point configured: $mount"
-            fi
+            pass "ZBM boot mount point: $mount"
         fi
     else
-        fail "ZBM config not found at /etc/zfsbootmenu/config.yaml"
+        fail "ZBM config not found"
     fi
 }
 
 check_zbm_images() {
-    local esp="${ESP_PATH:-/efi}"
-    local zbm_path="${esp}/EFI/ZBM"
+    local esp_path="${1:-/efi}"
+    local zbm_path="${esp_path}/EFI/ZBM"
 
     if [[ -d "$zbm_path" ]]; then
-        local image_count=$(ls "$zbm_path"/*.EFI 2>/dev/null | wc -l)
-        if [[ $image_count -gt 0 ]]; then
-            pass "ZBM images found: $image_count EFI file(s) in $zbm_path"
-
-            # Show most recent images
-            ls -lht "$zbm_path"/*.EFI 2>/dev/null | head -n2 | while IFS= read -r line; do
+        local images=$(ls "$zbm_path"/*.EFI 2>/dev/null | wc -l)
+        if [[ $images -gt 0 ]]; then
+            pass "ZBM images found: $images EFI file(s) in $zbm_path"
+            ls -lh "$zbm_path"/*.EFI 2>/dev/null | tail -n2 | while read line; do
                 echo "    $line"
             done
         else
@@ -188,33 +176,30 @@ check_zbm_images() {
 }
 
 check_uefi_entry() {
-    if ! command -v efibootmgr >/dev/null 2>&1; then
-        warn "efibootmgr not available - cannot check UEFI entries"
-        return
-    fi
-
-    if efibootmgr 2>/dev/null | grep -q "ZFSBootMenu"; then
-        local entry=$(efibootmgr 2>/dev/null | grep "ZFSBootMenu" | head -n1)
-        pass "UEFI entry exists: $entry"
+    if command -v efibootmgr >/dev/null 2>&1; then
+        if efibootmgr 2>/dev/null | grep -q "ZFSBootMenu"; then
+            local entry=$(efibootmgr | grep "ZFSBootMenu" | head -n1)
+            pass "UEFI entry exists: $entry"
+        else
+            warn "No ZFSBootMenu UEFI entry (add manually with efibootmgr)"
+        fi
     else
-        warn "No ZFSBootMenu UEFI entry (add manually with efibootmgr)"
+        warn "efibootmgr not available - cannot check UEFI entries"
     fi
 }
 
 # Snapshot and automation checks
 check_snapshots() {
-    if [[ -z "$ROOT_DATASET" ]]; then
-        warn "Cannot check snapshots - root dataset not detected"
-        return
-    fi
+    local root_dataset="${1:-}"
+    [[ -z "$root_dataset" ]] && return 1
 
-    local snap_count=$(zfs list -t snapshot -H -o name 2>/dev/null | grep "${ROOT_DATASET}@pacman-" | wc -l)
+    local snap_count=$(zfs list -t snapshot -H -o name -r "$root_dataset" 2>/dev/null | grep "@pacman-" | wc -l)
 
     if [[ $snap_count -gt 0 ]]; then
         pass "Pacman snapshots found: $snap_count"
 
         # Show most recent
-        local recent=$(zfs list -t snapshot -H -o name,creation 2>/dev/null | grep "${ROOT_DATASET}@pacman-" | tail -n1)
+        local recent=$(zfs list -t snapshot -H -o name,creation -r "$root_dataset" | grep "@pacman-" | tail -n1)
         if [[ -n "$recent" ]]; then
             echo "    Most recent: $recent"
         fi
@@ -232,25 +217,16 @@ check_pacman_hooks() {
     )
 
     local found=0
-    local missing=()
-
     for hook in "${expected_hooks[@]}"; do
         if [[ -f "$hooks_dir/$hook" ]]; then
             ((found++))
-        else
-            missing+=("$hook")
         fi
     done
 
     if [[ $found -eq ${#expected_hooks[@]} ]]; then
-        pass "All essential pacman hooks installed ($found/${#expected_hooks[@]})"
+        pass "All pacman hooks installed ($found/${#expected_hooks[@]})"
     else
-        fail "Some pacman hooks missing: ${missing[*]}"
-    fi
-
-    # Check for optional hook
-    if [[ -f "$hooks_dir/10-copy-kernel-to-esp.hook" ]]; then
-        pass "Optional systemd-boot fallback hook installed"
+        warn "Some pacman hooks missing ($found/${#expected_hooks[@]} found)"
     fi
 }
 
@@ -261,36 +237,29 @@ check_helper_scripts() {
     )
 
     local found=0
-    local missing=()
-
     for script in "${scripts[@]}"; do
         if [[ -x "$script" ]]; then
             ((found++))
-        else
-            missing+=("$(basename "$script")")
         fi
     done
 
     if [[ $found -eq ${#scripts[@]} ]]; then
         pass "Helper scripts installed and executable"
     else
-        fail "Some helper scripts missing or not executable: ${missing[*]}"
+        fail "Some helper scripts missing or not executable"
     fi
 }
 
 check_scrub_timer() {
-    local pool="${POOL:-zpcachyos}"
+    local pool="${1:-zpcachyos}"
 
     if systemctl is-enabled "zpool-scrub@${pool}.timer" &>/dev/null; then
         pass "Monthly scrub timer enabled for pool '$pool'"
 
         # Show next run time
         local next=$(systemctl show "zpool-scrub@${pool}.timer" --property=NextElapseUSecRealtime --value 2>/dev/null)
-        if [[ -n "$next" ]] && [[ "$next" != "0" ]] && [[ "$next" != "" ]]; then
-            local next_date=$(date -d "@$((next/1000000))" 2>/dev/null || echo "unknown")
-            if [[ "$next_date" != "unknown" ]]; then
-                echo "    Next scrub: $next_date"
-            fi
+        if [[ -n "$next" ]] && [[ "$next" != "0" ]]; then
+            echo "    Next scrub: $(date -d "@$((next/1000000))" 2>/dev/null || echo "unknown")"
         fi
     else
         warn "Scrub timer not enabled (enable with: systemctl enable --now zpool-scrub@${pool}.timer)"
@@ -300,21 +269,26 @@ check_scrub_timer() {
 check_kernel_locations() {
     local boot_kernel="/boot/vmlinuz-linux-cachyos"
     local boot_initramfs="/boot/initramfs-linux-cachyos.img"
-    local esp="${ESP_PATH:-/efi}"
+    local esp_path="${1:-/efi}"
+
+    local status=0
 
     if [[ -f "$boot_kernel" ]] && [[ -f "$boot_initramfs" ]]; then
         pass "Kernel files in /boot (for snapshots)"
     else
         fail "Kernel files missing from /boot"
+        status=1
     fi
 
-    if [[ -n "$esp" ]] && [[ -d "$esp" ]]; then
-        if [[ -f "$esp/vmlinuz-linux-cachyos" ]]; then
+    if [[ -n "$esp_path" ]]; then
+        if [[ -f "$esp_path/vmlinuz-linux-cachyos" ]]; then
             pass "Kernel files in ESP (for ZBM)"
         else
             warn "Kernel files not in ESP (may cause boot issues)"
         fi
     fi
+
+    return $status
 }
 
 # Fish shell checks
@@ -322,14 +296,12 @@ check_fish_shell() {
     if command -v fish >/dev/null 2>&1; then
         pass "Fish shell installed"
 
-        # Check if it's default for current user (when not root)
-        if [[ "$USER" != "root" ]]; then
-            local user_shell=$(getent passwd "$USER" | cut -d: -f7)
-            if [[ "$user_shell" == "/usr/bin/fish" ]]; then
-                pass "Fish is default shell for $USER"
-            else
-                warn "Fish not set as default shell (run: chsh -s /usr/bin/fish)"
-            fi
+        # Check if it's default for current user
+        local user_shell=$(getent passwd "$USER" | cut -d: -f7)
+        if [[ "$user_shell" == "/usr/bin/fish" ]]; then
+            pass "Fish is default shell for $USER"
+        else
+            warn "Fish not set as default shell (run: chsh -s /usr/bin/fish)"
         fi
     else
         warn "Fish shell not installed"
@@ -337,17 +309,17 @@ check_fish_shell() {
 }
 
 check_fish_functions() {
-    local fish_dir="${HOME}/.config/fish"
+    local fish_dir="$HOME/.config/fish"
 
     if [[ -d "$fish_dir/functions" ]]; then
         local func_count=$(ls "$fish_dir/functions"/zfs-*.fish 2>/dev/null | wc -l)
         if [[ $func_count -gt 0 ]]; then
             pass "Fish ZFS functions installed: $func_count functions"
         else
-            warn "No ZFS fish functions found in $fish_dir/functions"
+            warn "No ZFS fish functions found"
         fi
     else
-        warn "Fish config directory not found at $fish_dir"
+        warn "Fish config directory not found"
     fi
 }
 
@@ -358,28 +330,28 @@ main() {
     echo "═══════════════════════════════════════"
 
     header "Core System"
-    check_root_on_zfs
+    ROOT_DATASET=$(check_root_on_zfs)
     check_boot_directory
-    check_esp_mount
+    ESP_PATH=$(check_esp_mount)
 
     header "ZFS Configuration"
-    check_zfs_pool
-    check_bootfs_property
-    check_zbm_properties
+    POOL=$(check_zfs_pool)
+    check_bootfs_property "$POOL"
+    check_zbm_properties "$ROOT_DATASET"
 
     header "ZFSBootMenu"
     check_zbm_config
-    check_zbm_images
+    check_zbm_images "${ESP_PATH:-/efi}"
     check_uefi_entry
 
     header "Kernel Locations"
-    check_kernel_locations
+    check_kernel_locations "${ESP_PATH:-/efi}"
 
     header "Snapshots & Automation"
-    check_snapshots
+    check_snapshots "$ROOT_DATASET"
     check_pacman_hooks
     check_helper_scripts
-    check_scrub_timer
+    check_scrub_timer "$POOL"
 
     header "Fish Shell"
     check_fish_shell
