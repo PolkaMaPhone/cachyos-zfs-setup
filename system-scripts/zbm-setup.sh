@@ -43,6 +43,30 @@ ensure_rw_root() {
   rm -f /tmp/.zbm-rw-test.$$
 }
 
+install_required_packages() {
+  say "Installing required packages..."
+
+  local packages=(
+    "zfsbootmenu"
+    "efibootmgr"
+    "dosfstools"
+  )
+
+  for pkg in "${packages[@]}"; do
+    if ! pacman -Q "$pkg" >/dev/null 2>&1; then
+      say "Installing $pkg..."
+      pacman -S --noconfirm "$pkg" || {
+        warn "Failed to install $pkg from official repos, trying AUR..."
+        if command -v yay >/dev/null; then
+          yay -S --noconfirm "$pkg"
+        else
+          die "Package $pkg not found and no AUR helper available"
+        fi
+      }
+    fi
+  done
+}
+
 detect_esp() {
   # Priority 1: CLI arg
   if [[ $# -ge 1 && -n "${1:-}" ]]; then
@@ -308,6 +332,7 @@ final_checks() {
 main() {
   require_root
   ensure_rw_root
+  install_required_packages
   detect_esp "$@"
   ensure_dirs
   move_esp_to_efi_if_needed
