@@ -59,6 +59,15 @@ function zfs-be-clone --description 'Clone snapshot to boot environment'
         return 1
     end
 
+    # Remove pacman database lock from new BE
+    set -l mnt (mktemp -d)
+    if sudo mount -t zfs $be_root $mnt
+        sudo rm -f $mnt/var/lib/pacman/db.lck
+        sudo umount $mnt
+    end
+    rmdir $mnt
+
+
     # Set ZBM properties
     set -l zbm_cmd "sudo zfs set org.zfsbootmenu:commandline=\"rw quiet\" $be_root"
     if not set -q _flag_quiet
