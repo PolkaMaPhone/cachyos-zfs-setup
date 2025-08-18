@@ -12,6 +12,9 @@ USER_HOME="/home/$SUDO_USER"
 : "${SNAPSHOT_KEEP:=20}"
 : "${KERNEL_BASENAME:=linux-cachyos}"
 
+# Shared hook helpers
+source "$SCRIPT_DIR/system-scripts/hooks-common.sh"
+
 echo "=== CachyOS ZFS Setup Installation ==="
 
 # Utility functions
@@ -104,139 +107,12 @@ install_system_scripts() {
 install_embedded_hooks() {
     say "Installing pacman hooks..."
 
-    install -d /etc/pacman.d/hooks
-    install -d /usr/local/sbin
-
-    # Optimized pre-snapshot hook
-    cat >/usr/local/sbin/zfs-pre-pacman-snapshot.sh <<'HOOK_SH'
-#!/usr/bin/env bash
-set -euo pipefail
-
-BE="$(findmnt -no SOURCE /)"
-[[ -z "$BE" ]] && exit 1
-
-# Ensure kernels exist before snapshot
-if [[ ! -f /boot/vmlinuz-linux-cachyos ]]; then
-    for esp in /efi /boot/efi; do
-        if [[ -f "$esp/vmlinuz-linux-cachyos" ]]; then
-            cp "$esp"/vmlinuz* "$esp"/initramfs* /boot/ 2>/dev/null
-            break
-        fi
-    done || pacman -S --noconfirm linux-cachyos
-fi
-
-# Skip if recent snapshot exists (within 3 minutes)
-LAST=$(zfs list -Hp -t snapshot -o name,creation "$BE" 2>/dev/null | grep '@pacman-' | tail -1)
-if [[ -n "$LAST" ]]; then
-    AGE=$(($(date +%s) - $(echo "$LAST" | awk '{print $2}')))
-    [[ $AGE -lt 180 ]] && exit 0
-fi
-
-# Create snapshot
-TAG="pacman-$(date +%Y%m%d-%H%M%S)"
-zfs snapshot "${BE}@${TAG}"
-echo "[zfs-pre-snap] Created snapshot: ${BE}@${TAG}"
-HOOK_SH
-    chmod 0755 /usr/local/sbin/zfs-pre-pacman-snapshot.sh
-
-    # Prune snapshots hook
-    cat >/usr/local/sbin/zfs-prune-pacman-snapshots.sh <<PRUNE_SH
-#!/usr/bin/env bash
-set -euo pipefail
-KEEP=\${KEEP:-${SNAPSHOT_KEEP}}
-BE="\$(findmnt -no SOURCE /)"
-[[ -z "\$BE" ]] && exit 1
-
-mapfile -t snaps < <(zfs list -H -t snapshot -o name -s creation | grep "^\${BE}@pacman-")
-if (( \${#snaps[@]} > KEEP )); then
-    del_count=\$(( \${#snaps[@]} - KEEP ))
-    printf "%s\n" "\${snaps[@]:0:del_count}" | xargs -r -n1 zfs destroy
-    echo "[zfs-prune] Removed \$del_count old snapshot(s)"
-fi
-PRUNE_SH
-    chmod 0755 /usr/local/sbin/zfs-prune-pacman-snapshots.sh
-
-    # Optional: Copy kernel to ESP helper
-    if [[ "${USE_SYSTEMD_BOOT_FALLBACK}" == "true" ]]; then
-        cat >/usr/local/sbin/copy-kernel-to-esp.sh <<'COPY_SH'
-#!/usr/bin/env bash
-set -euo pipefail
-
-ESP="${ESP:-/efi}"
-[[ -d "$ESP" ]] || ESP="/boot/efi"
-[[ -d "$ESP" ]] || { echo "[copy-kernel] No ESP found"; exit 0; }
-
-# Ensure /boot has kernels (for snapshots)
-[[ -f /boot/vmlinuz-linux-cachyos ]] || {
-    [[ -f "$ESP/vmlinuz-linux-cachyos" ]] && \
-        cp "$ESP"/{vmlinuz,initramfs}* /boot/ 2>/dev/null
-}
-
-# Copy to ESP for fallback
-mkdir -p "$ESP/EFI/Linux" 2>/dev/null || true
-for f in /boot/vmlinuz* /boot/initramfs* /boot/*-ucode.img; do
-    [[ -f "$f" ]] && cp -f "$f" "$ESP/" 2>/dev/null || true
-done
-COPY_SH
-        chmod 0755 /usr/local/sbin/copy-kernel-to-esp.sh
-    fi
-
-    # Install pacman hooks
-    cat >/etc/pacman.d/hooks/00-zfs-pre-snapshot.hook <<'HOOK'
-[Trigger]
-Operation = Install
-Operation = Upgrade
-Operation = Remove
-Type = Package
-Target = *
-
-[Action]
-Description = ZFS snapshot of root BE (pre-transaction)
-When = PreTransaction
-Exec = /usr/local/sbin/zfs-pre-pacman-snapshot.sh
-HOOK
-
-    cat >/etc/pacman.d/hooks/99-zfs-prune-snapshots.hook <<'HOOK'
-[Trigger]
-Operation = Install
-Operation = Upgrade
-Operation = Remove
-Type = Package
-Target = *
-
-[Action]
-Description = Prune old ZFS pacman snapshots
-When = PostTransaction
-Exec = /usr/local/sbin/zfs-prune-pacman-snapshots.sh
-HOOK
-
-    cat >/etc/pacman.d/hooks/90-generate-zbm.hook <<'HOOK'
-[Trigger]
-Operation = Install
-Operation = Upgrade
-Type = Package
-Target = linux*
-Target = zfsbootmenu
-
-[Action]
-Description = Generate ZFSBootMenu images
-When = PostTransaction
-Exec = /usr/bin/bash -c 'command -v generate-zbm >/dev/null 2>&1 && generate-zbm || true'
-HOOK
+    install_pre_snapshot_hook
+    install_prune_snapshots_hook
+    install_generate_zbm_hook
 
     if [[ "${USE_SYSTEMD_BOOT_FALLBACK}" == "true" ]]; then
-        cat >/etc/pacman.d/hooks/10-copy-kernel-to-esp.hook <<'HOOK'
-[Trigger]
-Operation = Install
-Operation = Upgrade
-Type = Package
-Target = linux*
-
-[Action]
-Description = Mirror kernel/initramfs to ESP (systemd-boot fallback)
-When = PostTransaction
-Exec = /usr/local/sbin/copy-kernel-to-esp.sh
-HOOK
+        install_copy_kernel_to_esp_hook
     fi
 
     say "✓ Pacman hooks installed"
