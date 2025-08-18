@@ -173,13 +173,13 @@ detect_setup_stage() {
 
 
 install_embedded_pacman_hooks() {
-    echo "Installing embedded pacman hooks and helper scripts..."
+  echo "Installing embedded pacman hooks and helper scripts..."
 
-    install -d /etc/pacman.d/hooks
-    install -d /usr/local/sbin
+  install -d /etc/pacman.d/hooks
+  install -d /usr/local/sbin
 
-    # --- Helper: pre-transaction snapshot (safe; skips if BE not bootable) ---
-    cat >/usr/local/sbin/zfs-pre-pacman-snapshot.sh <<'H_SH'
+  # --- Helper: pre-transaction snapshot (skips if BE not bootable) ---
+  cat >/usr/local/sbin/zfs-pre-pacman-snapshot.sh <<'H_SH'
 #!/usr/bin/env bash
 set -euo pipefail
 POOL=$(zpool list -H -o name | head -n1)
@@ -187,38 +187,115 @@ BOOTFS=$(zpool get -H -o value bootfs "$POOL")
 MNT=$(mktemp -d)
 trap 'umount -lf "$MNT" >/dev/null 2>&1 || true; rmdir "$MNT" >/dev/null 2>&1 || true' EXIT
 
-# Try to mount; ok if already mounted elsewhere
+# Try to mount; OK if already mounted elsewhere
 mount -t zfs "$BOOTFS" "$MNT" >/dev/null 2>&1 || true
 
-if [[ -d "$MNT/boot" ]]; then
-  shopt -s nullglob
-  kernels=( "$MNT"/boot/vmlinuz* "$MNT"/boot/linux* "$MNT"/boot/Image* )
-  inits=( "$MNT"/boot/initramfs-* "$MNT"/boot/initrd-* )
-  ukis=( "$MNT"/boot/*.efi )
-  shopt -u nullglob
-  if (( ${#ukis[@]} > 0 || ( ${#kernels[@]} > 0 && ${#inits[@]} > 0 ) )); then
-    ts=$(date +%Y%m%d-%H%M%S)
-    zfs snapshot "${BOOTFS}@pacman-${ts}"
+shopt -s nullglob
+kernels=( "$MNT"/boot/vmlinuz* "$MNT"/boot/linux* "$MNT"/boot/Image* )
+inits=( "$MNT"/boot/initramfs-* "$MNT"/boot/initrd-* )
+ukis=( "$MNT"/boot/*.efi )
+shopt -u nullglob
+
+if (( ${#ukis[@]} > 0 )) || (( ${#kernels[@]} > 0 && ${#inits[@]} > 0 )); then
+  ts=$(date +%Y%m%d-%H%M%S)
+  zfs snapshot "${BOOTFS}@pacman-${ts}"
+else
+  echo "[zfs-pre-pacman-snapshot] Skipping: BE lacks kernel assets" >&2
+fi
+H_SH
+  chmod 0755 /usr/local/sbin/zfs-pre-pacman-snapshot.sh
+
+  # --- Helper: prune old pacman snapshots (keep last 20) ---
+  cat >/usr/local/sbin/zfs-prune-pacman-snapshots.sh <<'H_SH'
+#!/usr/bin/env bash
+set -euo pipefail
+KEEP=${KEEP:-20}
+POOL=$(zpool list -H -o name | head -n1)
+BOOTFS=$(zpool get -H -o value bootfs "$POOL")
+mapfile -t snaps < <(zfs list -H -t snapshot -o name -s creation | grep "^${BOOTFS}@pacman-")
+if (( ${#snaps[@]} > KEEP )); then
+  del_count=$(( ${#snaps[@]} - KEEP ))
+  printf "%s\n" "${snaps[@]:0:del_count}" | xargs -r -n1 zfs destroy
+fi
+H_SH
+  chmod 0755 /usr/local/sbin/zfs-prune-pacman-snapshots.sh
+
+  # --- Optional helper: copy kernel/initramfs to ESP (fallback) ---
+  if [[ "${USE_SYSTEMD_BOOT_FALLBACK:-true}" == "true" ]]; then
+    cat >/usr/local/sbin/copy-kernel-to-esp.sh <<'H_SH'
+#!/usr/bin/env bash
+set -euo pipefail
+ESP="${ESP:-/efi}"
+if [[ ! -d "$ESP" ]]; then
+  if mountpoint -q /boot/efi; then ESP=/boot/efi; else
+    echo "[copy-kernel-to-esp] ESP not mounted at /efi or /boot/efi; skipping" >&2
     exit 0
   fi
 fi
-
-echo "[zfs-pre-pacman-snapshot] Skipping: BE lacks kernel assets" >&2
-exit 0
+mkdir -p "$ESP/EFI/Linux"
+shopt -s nullglob
+bootsrc=( /boot/vmlinuz* /boot/linux* /boot/Image* )
+initsrc=( /boot/initramfs-* /boot/initrd-* )
+ukisrc=( /boot/*.efi )
+shopt -u nullglob
+if (( ${#ukisrc[@]} > 0 )); then
+  cp -f "${ukisrc[@]}" "$ESP/EFI/Linux/"
+elif (( ${#bootsrc[@]} > 0 && ${#initsrc[@]} > 0 )); then
+  cp -f "${bootsrc[@]}" "${initsrc[@]}" "$ESP/EFI/Linux/"
+else
+  echo "[copy-kernel-to-esp] No kernel assets in /boot; skipping" >&2
+fi
 H_SH
-    chmod 0755 /usr/local/sbin/zfs-pre-pacman-snapshot.sh
+    chmod 0755 /usr/local/sbin/copy-kernel-to-esp.sh
+  fi
 
-    # --- Helper: prune old pacman snapshots (keep last 20) ---
-    cat >/usr/local/sbin/zfs-prune-pacman-snapsho
-        # Install embedded hooks now (safe: pre-snapshot hook skips until bootable)
-        install_embedded_pacman_hooks
-        enable_zfs_automation
-        set_fish_default
-        echo ""
-        echo "=== Hooks installed ==="
-        echo "Pacman hooks are active. The snapshot hook will skip until your BE is bootable."
-e}" == "true" ]]; then
-      cat >/etc/pacman.d/hooks/10-copy-kernel-to-esp.hook <<'H_HOOK'
+  # --- Hooks ---
+  cat >/etc/pacman.d/hooks/00-zfs-pre-snapshot.hook <<'H_HOOK'
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Package
+Target = *
+
+[Action]
+Description = ZFS snapshot of root BE (pre-transaction, only if bootable)
+When = PreTransaction
+Exec = /usr/local/sbin/zfs-pre-pacman-snapshot.sh
+H_HOOK
+
+  cat >/etc/pacman.d/hooks/99-zfs-prune-snapshots.hook <<'H_HOOK'
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Package
+Target = *
+
+[Action]
+Description = Prune old ZFS pacman snapshots (keep last 20)
+When = PostTransaction
+Exec = /usr/local/sbin/zfs-prune-pacman-snapshots.sh
+H_HOOK
+
+  cat >/etc/pacman.d/hooks/90-generate-zbm.hook <<'H_HOOK'
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = linux*
+Target = mkinitcpio
+Target = dracut
+Target = zfsbootmenu
+
+[Action]
+Description = Generate ZFSBootMenu EFI images
+When = PostTransaction
+Exec = /usr/bin/bash -lc 'command -v generate-zbm >/dev/null 2>&1 && generate-zbm || true'
+H_HOOK
+
+  if [[ "${USE_SYSTEMD_BOOT_FALLBACK:-true}" == "true" ]]; then
+    cat >/etc/pacman.d/hooks/10-copy-kernel-to-esp.hook <<'H_HOOK'
 [Trigger]
 Operation = Install
 Operation = Upgrade
@@ -232,53 +309,11 @@ Description = Mirror kernel/initramfs to ESP (fallback for firmware boot)
 When = PostTransaction
 Exec = /usr/local/sbin/copy-kernel-to-esp.sh
 H_HOOK
-    fi
+  fi
 
-    echo "✓ Pacman hooks installed (embedded)"
+  echo "✓ Pacman hooks installed (embedded)"
 }
-main() {
-    # Check we're running as root
-    [[ $EUID -eq 0 ]] || { echo "Error: Run as root (sudo ./install.sh)"; exit 1; }
-    [[ -n "${SUDO_USER:-}" ]] || { echo "Error: Must use sudo, not direct root"; exit 1; }
 
-    # Detect installation stage
-    local zbm_configured=$(detect_setup_stage || echo "not-detected")
-
-    if [[ "$zbm_configured" == "detected" ]]; then
-        echo "ZBM already configured - full installation mode"
-
-        # If ZBM is configured, ensure kernels are in /boot first
-        ensure_kernels_in_boot
-
-        # Install everything including hooks
-        install_fish_config
-        install_system_scripts
-        install_pacman_hooks  # Safe to install now
-        enable_zfs_automation
-        set_fish_default
-
-        # Clean up any bad snapshots that might have been created
-        cleanup_unbootable_snapshots
-
-    else
-        echo "ZBM not yet configured - minimal installation mode"
-        echo "Deferring pacman hooks until after ZBM setup"
-
-        # Install everything EXCEPT pacman hooks
-        install_fish_config
-        stage_pacman_hooks
-        install_system_scripts  # Scripts only, no hooks
-        set_fish_default
-
-        # Create a script to finish installation after ZBM setup
-
-        # Install embedded hooks now (safe: pre-snapshot hook skips until bootable)
-        install_embedded_pacman_hooks
-        enable_zfs_automation
-        set_fish_default
-        echo ""
-        echo "=== Hooks installed ==="
-        echo "Pacman hooks are active. The snapshot hook will skip until your BE is bootable."
 fi
 
     echo ""
