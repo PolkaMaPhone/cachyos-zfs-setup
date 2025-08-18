@@ -529,18 +529,34 @@ ensure_kernel_files_synced() {
 }
 
 verify_be_boot_assets() {
-  local ds="$1"
+  local ds="${1:?verify_be_boot_assets: dataset argument required}"
   local mnt
   mnt="$(mktemp -d)"
-  mount -t zfs "$ds" "$mnt"
-  if ! (ls "$mnt/boot" | grep -Eq '(^vmlinuz|^linux|^Image|\.efi$)' && \
-        ls "$mnt/boot" | grep -Eq '(^initramfs-|^initrd-|\.efi$)'); then
-    umount "$mnt"; rmdir "$mnt"
-    die "BE $ds lacks kernel/initramfs in /boot"
-  fi
-  umount "$mnt"; rmdir "$mnt"
-}
 
+  # Always clean up mountpoint, even on early exit
+  trap 'umount -lf "$mnt" >/dev/null 2>&1 || true; rmdir "$mnt" >/dev/null 2>&1 || true' RETURN
+
+  mount -t zfs "$ds" "$mnt"
+
+  # /boot must exist in the BE
+  if [[ ! -d "$mnt/boot" ]]; then
+    die "BE $ds has no /boot directory"
+  fi
+
+  # Look for either (kernel + initramfs) OR a UKI (*.efi)
+  shopt -s nullglob
+  local kernels=( "$mnt"/boot/vmlinuz* "$mnt"/boot/linux* "$mnt"/boot/Image* )
+  local inits=( "$mnt"/boot/initramfs-* "$mnt"/boot/initrd-* )
+  local ukis=( "$mnt"/boot/*.efi )
+  shopt -u nullglob
+
+  if (( ${#ukis[@]} > 0 )); then
+    return 0
+  fi
+  if (( ${#kernels[@]} == 0 || ${#inits[@]} == 0 )); then
+    die "BE $ds lacks kernel+initramfs (or UKI) in /boot"
+  fi
+}
 
 final_checks() {
   say "Quick status:"
