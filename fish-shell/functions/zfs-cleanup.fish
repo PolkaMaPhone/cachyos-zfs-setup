@@ -1,5 +1,5 @@
 function zfs-cleanup --description 'Clean up test and temporary ZFS datasets'
-    set -l options 'h/help' 't/test-be' 's/test-snapshots' 'm/manual-snapshots' 'o/old=' 'f/force' 'n/dry-run' 'q/quiet'
+    set -l options 'h/help' 't/test-be' 's/test-snapshots' 'm/manual-snapshots' 'u/unbootable' 'o/old=' 'f/force' 'n/dry-run' 'q/quiet'
     argparse $options -- $argv
     or return
 
@@ -8,6 +8,7 @@ function zfs-cleanup --description 'Clean up test and temporary ZFS datasets'
         echo "  -t/--test-be         Clean up test boot environments (test-*)"
         echo "  -s/--test-snapshots  Clean up test snapshots (@test-*)"
         echo "  -m/--manual-snapshots Clean up manual snapshots (@manual-*)"
+        echo "  -u/--unbootable      Scan for unbootable pacman snapshots"
         echo "  -o/--old DAYS        Clean up snapshots older than N days (not implemented)"
         echo "  -f/--force           Skip confirmation prompts"
         echo "  -n/--dry-run         Show what would be deleted without doing it"
@@ -18,9 +19,9 @@ function zfs-cleanup --description 'Clean up test and temporary ZFS datasets'
         return
     end
 
-    if not set -q _flag_test_be; and not set -q _flag_test_snapshots; and not set -q _flag_manual_snapshots; and not set -q _flag_old
+    if not set -q _flag_test_be; and not set -q _flag_test_snapshots; and not set -q _flag_manual_snapshots; and not set -q _flag_unbootable; and not set -q _flag_old
         echo "Error: No cleanup type specified. Use -h for help."
-        echo "Available cleanup types: -t (test BEs), -s (test snapshots), -m (manual snapshots)"
+        echo "Available cleanup types: -t (test BEs), -s (test snapshots), -m (manual snapshots), -u (unbootable snapshots)"
         return 1
     end
 
@@ -46,6 +47,37 @@ function zfs-cleanup --description 'Clean up test and temporary ZFS datasets'
         set items_to_delete (zfs list -t snapshot -H -o name | grep '@manual-')
         set description "manual snapshots"
         set destroy_cmd_base "sudo zfs destroy"
+    else if set -q _flag_unbootable
+        echo "Scanning for unbootable snapshots..."
+        set description "selected unbootable snapshots"
+        set destroy_cmd_base "sudo zfs destroy"
+        set root_dataset (findmnt -no SOURCE / 2>/dev/null)
+        if test -z "$root_dataset"
+            echo "Error: Could not determine root dataset"
+            return 1
+        end
+
+        for snapshot in (zfs list -H -t snapshot -o name -r $root_dataset | grep '@pacman-')
+            set temp_mount (mktemp -d)
+            if mount -t zfs -o ro $snapshot $temp_mount >/dev/null ^/dev/null
+                if not ls $temp_mount/boot/vmlinuz-* >/dev/null ^/dev/null
+                    if set -q _flag_dry_run
+                        set items_to_delete $items_to_delete $snapshot
+                    else
+                        read -l resp -P "Snapshot $snapshot is unbootable. Delete? [y/N] "
+                        if test "$resp" = "y" -o "$resp" = "Y"
+                            set items_to_delete $items_to_delete $snapshot
+                        end
+                    end
+                end
+                umount $temp_mount >/dev/null ^/dev/null
+            end
+            rm -rf $temp_mount
+        end
+
+        if not set -q _flag_dry_run
+            set _flag_force 1
+        end
     else if set -q _flag_old
         echo "Error: Old snapshot cleanup not yet implemented"
         echo "This would require complex date parsing. Use manual cleanup for now."
