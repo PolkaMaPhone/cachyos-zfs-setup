@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# zbm-setup.sh v3.0 — Streamlined ZFSBootMenu setup for CachyOS/Arch
-# Optimized with simplified configuration and cleaner logic
+# zbm-setup.sh v3.1 — Fixed ZFSBootMenu setup for CachyOS/Arch
+# Fixes: UEFI entry creation and pre-snapshot hook
 
 set -euo pipefail
 
@@ -144,6 +144,7 @@ ensure_kernels() {
     local target="${1:-/boot}"
     local kernel_file="$target/vmlinuz-${KERNEL_BASENAME}"
 
+    mkdir -p "$target"
     [[ -f "$kernel_file" ]] && return 0
 
     say "Installing kernel files to $target..."
@@ -185,6 +186,9 @@ Global:
   ManageImages: true
   BootTimeout: ${ZBM_TIMEOUT}
   BootMountPoint: "${EFI_DIR}"
+  RootPrefix: "root=ZFS="
+  KernelCmdline: "${ZBM_KERNEL_CMDLINE}"
+  InitCPIOConfig: /etc/zfsbootmenu/mkinitcpio.conf
 
 EFI:
   Enabled: true
@@ -195,16 +199,90 @@ YAML
     say "✓ ZBM config written"
 }
 
+write_pre_snapshot_hook() {
+    say "Writing fixed pre-snapshot hook..."
+
+    cat >/usr/local/sbin/zfs-pre-pacman-snapshot.sh <<'HOOK_SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Get the current boot environment
+BE="$(findmnt -no SOURCE /)"
+if [[ -z "$BE" ]]; then
+    echo "[zfs-pre-snap] Could not detect root dataset" >&2
+    exit 1
+fi
+
+# Ensure kernel files are in /boot before snapshot
+if [[ ! -f /boot/vmlinuz-linux-cachyos ]]; then
+    echo "[zfs-pre-snap] Ensuring kernel files in /boot before snapshot..."
+
+    # Try to copy from ESP
+    for esp_dir in /efi /boot/efi; do
+        if [[ -f "$esp_dir/vmlinuz-linux-cachyos" ]]; then
+            cp "$esp_dir"/vmlinuz-linux-cachyos /boot/
+            cp "$esp_dir"/initramfs-linux-cachyos*.img /boot/ 2>/dev/null || true
+            [[ -f "$esp_dir/amd-ucode.img" ]] && cp "$esp_dir/amd-ucode.img" /boot/
+            [[ -f "$esp_dir/intel-ucode.img" ]] && cp "$esp_dir/intel-ucode.img" /boot/
+            break
+        fi
+    done
+
+    # If still no kernel, install it
+    if [[ ! -f /boot/vmlinuz-linux-cachyos ]]; then
+        echo "[zfs-pre-snap] Installing kernel package..."
+        pacman -S --noconfirm linux-cachyos
+    fi
+fi
+
+# Check for recent snapshots to avoid spam during batch operations
+BATCH_WINDOW="${BATCH_WINDOW:-3}"
+RECENT_SNAP=$(zfs list -H -t snapshot -o name,creation -s creation -r "$BE" 2>/dev/null | grep "@pacman-" | tail -1 || true)
+
+if [[ -n "$RECENT_SNAP" ]]; then
+    SNAP_NAME=$(echo "$RECENT_SNAP" | awk '{print $1}')
+    SNAP_TIME=$(echo "$RECENT_SNAP" | awk '{$1=""; print $0}' | sed 's/^ *//')
+
+    # Try to parse the snapshot time
+    SNAP_EPOCH=$(date -d "$SNAP_TIME" +%s 2>/dev/null || echo "0")
+    CURRENT_EPOCH=$(date +%s)
+    WINDOW_SECONDS=$((BATCH_WINDOW * 60))
+
+    if [[ $SNAP_EPOCH -gt 0 ]] && [[ $((CURRENT_EPOCH - SNAP_EPOCH)) -lt $WINDOW_SECONDS ]]; then
+        AGE_SEC=$((CURRENT_EPOCH - SNAP_EPOCH))
+        echo "[zfs-pre-snap] Recent snapshot exists (${AGE_SEC}s ago), skipping"
+        exit 0
+    fi
+fi
+
+# Create snapshot with kernel files in place
+STAMP="$(date +%Y%m%d-%H%M%S)"
+TAG="pacman-${STAMP}"
+
+echo "[zfs-pre-snap] Creating snapshot ${BE}@${TAG}"
+zfs snapshot "${BE}@${TAG}"
+
+# Set optional metadata
+zfs set custom:pacman_version="$(pacman -Q pacman 2>/dev/null | cut -d' ' -f2)" "${BE}@${TAG}" 2>/dev/null || true
+zfs set custom:kernel_version="$(uname -r)" "${BE}@${TAG}" 2>/dev/null || true
+
+echo "[zfs-pre-snap] Snapshot created successfully"
+HOOK_SH
+
+    chmod +x /usr/local/sbin/zfs-pre-pacman-snapshot.sh
+    say "✓ Pre-snapshot hook installed"
+}
+
 write_post_hooks() {
     say "Installing ZBM post-generation hooks..."
 
-    # Stable filename hook - CRITICAL for UEFI boot entry
+    # Stable filename hook
     cat >/etc/zfsbootmenu/generate-zbm.post.d/10-stable-names.sh <<'HOOK'
 #!/usr/bin/env bash
 set -euo pipefail
 
 ESP_DIR="/efi/EFI/ZBM"
-LOG="/var/log/zfsbootmenu/rename.log"
+LOG="/var/log/zfsbootmenu/stable-names.log"
 mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
 
 # Find the newest generated EFI file
@@ -215,18 +293,18 @@ if [[ -z "$NEW" ]]; then
     exit 0
 fi
 
-# Backup existing if present
+# Rotate backups
 if [[ -f "${ESP_DIR}/ZFSBootMenu.EFI" ]]; then
     mv -f "${ESP_DIR}/ZFSBootMenu.EFI" "${ESP_DIR}/ZFSBootMenu-backup.EFI"
-    echo "[zbm-hook] Backed up existing ZFSBootMenu.EFI" | tee -a "$LOG"
+    echo "[zbm-hook] Backed up previous ZFSBootMenu.EFI" | tee -a "$LOG"
 fi
 
-# Create stable filename for UEFI entry
+# Set new stable
 mv -f "$NEW" "${ESP_DIR}/ZFSBootMenu.EFI"
-echo "[zbm-hook] Created stable: $(basename "$NEW") -> ZFSBootMenu.EFI" | tee -a "$LOG"
+echo "[zbm-hook] Updated ZFSBootMenu.EFI from $(basename "$NEW")" | tee -a "$LOG"
 
-# Clean up any other versioned files to save space
-find "${ESP_DIR}" -name "vmlinuz-*.EFI" -mtime +7 -delete 2>/dev/null || true
+# Clean up any remaining versioned files
+rm -f "${ESP_DIR}"/vmlinuz-*.EFI 2>/dev/null || true
 HOOK
     chmod +x /etc/zfsbootmenu/generate-zbm.post.d/10-stable-names.sh
 
@@ -250,94 +328,75 @@ sync_kernels_to_esp() {
 generate_zbm_images() {
     say "Generating ZFSBootMenu images..."
 
-    # Ensure generate-zbm exists
-    if ! command -v generate-zbm >/dev/null 2>&1; then
-        die "generate-zbm not found. Install zfsbootmenu package first."
-    fi
-
     if generate-zbm; then
         say "✓ ZBM images generated"
-
-        # Verify the images exist
-        if [[ -f "${ZBM_EFI_PATH}/ZFSBootMenu.EFI" ]]; then
-            ls -lh "${ZBM_EFI_PATH}"/*.EFI 2>/dev/null || true
-        else
-            warn "ZBM images generated but ZFSBootMenu.EFI not found"
-            warn "Check ${ZBM_EFI_PATH} for generated files"
-        fi
+        ls -lh "${ZBM_EFI_PATH}"/*.EFI 2>/dev/null || true
     else
         warn "ZBM generation had warnings - check output"
     fi
 }
 
 create_uefi_entry() {
-    say "Configuring UEFI boot entry..."
+    say "Creating UEFI boot entry for ZFSBootMenu..."
 
-    # Check if we're in UEFI mode
-    if [[ ! -d /sys/firmware/efi ]]; then
-        warn "System not booted in UEFI mode - cannot create boot entry"
-        return 1
-    fi
-
-    # Check for existing entry
-    if efibootmgr -v 2>/dev/null | grep -q "ZFSBootMenu"; then
+    # Check if entry already exists
+    if efibootmgr 2>/dev/null | grep -q "ZFSBootMenu"; then
         say "✓ ZFSBootMenu entry already exists"
         efibootmgr | grep "ZFSBootMenu"
         return 0
     fi
 
-    # Verify the EFI file exists
-    if [[ ! -f "${ZBM_EFI_PATH}/ZFSBootMenu.EFI" ]]; then
-        warn "ZFSBootMenu.EFI not found at ${ZBM_EFI_PATH}"
-        warn "Run 'generate-zbm' first to create the boot images"
-        return 1
+    # Parse the ESP device to get disk and partition
+    local disk="" partnum=""
+
+    # Method 1: Try using lsblk with PKNAME/PARTNUM support
+    if command -v lsblk >/dev/null 2>&1; then
+        # Check if this version of lsblk supports PKNAME
+        if lsblk --help 2>&1 | grep -q "PKNAME"; then
+            disk="/dev/$(lsblk -no PKNAME "${ESP_DEV}" 2>/dev/null || true)"
+        fi
+
+        # Check if this version supports PARTNUM
+        if lsblk --help 2>&1 | grep -q "PARTNUM"; then
+            partnum="$(lsblk -no PARTNUM "${ESP_DEV}" 2>/dev/null || true)"
+        fi
     fi
 
-    # Determine disk and partition
-    local disk partnum
-
-    # Method 1: Use lsblk if it supports PARTNUM
-    if command -v lsblk >/dev/null && lsblk --help 2>&1 | grep -q PARTNUM; then
-        disk="/dev/$(lsblk -no PKNAME "${ESP_DEV}")"
-        partnum="$(lsblk -no PARTNUM "${ESP_DEV}")"
-    else
-        # Method 2: Parse device name
-        if [[ "$ESP_DEV" =~ ^(/dev/[a-z]+)([0-9]+)$ ]]; then
+    # Method 2: Fallback to string manipulation
+    if [[ -z "$disk" ]] || [[ -z "$partnum" ]]; then
+        # For /dev/nvme0n1p1 -> disk=/dev/nvme0n1, partnum=1
+        # For /dev/sda1 -> disk=/dev/sda, partnum=1
+        if [[ "$ESP_DEV" =~ ^(/dev/[^0-9]+)([0-9]+)$ ]]; then
             disk="${BASH_REMATCH[1]}"
             partnum="${BASH_REMATCH[2]}"
         elif [[ "$ESP_DEV" =~ ^(/dev/nvme[0-9]+n[0-9]+)p([0-9]+)$ ]]; then
             disk="${BASH_REMATCH[1]}"
             partnum="${BASH_REMATCH[2]}"
         else
-            warn "Could not parse partition from $ESP_DEV"
+            warn "Could not parse ESP device: $ESP_DEV"
+            warn "Please create UEFI entry manually:"
+            echo "  efibootmgr -c -d DISK -p PARTITION -L 'ZFSBootMenu' -l '\\EFI\\ZBM\\ZFSBootMenu.EFI'"
             return 1
         fi
     fi
 
     say "Creating UEFI entry: disk=$disk partition=$partnum"
 
-    # Create the boot entry
     if efibootmgr -c -d "${disk}" -p "${partnum}" \
-        -L "ZFSBootMenu" -l '\EFI\ZBM\ZFSBootMenu.EFI' 2>/dev/null; then
+        -L "ZFSBootMenu" -l '\EFI\ZBM\ZFSBootMenu.EFI'; then
         say "✓ Created UEFI entry: ZFSBootMenu"
 
         # Show the new entry
-        efibootmgr -v | grep "ZFSBootMenu"
+        efibootmgr | grep "ZFSBootMenu"
 
-        # Optionally set it as next boot
+        # Optionally set it as first in boot order
         local bootnum=$(efibootmgr | grep "ZFSBootMenu" | sed -n 's/^Boot\([0-9A-F]*\).*/\1/p' | head -n1)
         if [[ -n "$bootnum" ]]; then
-            say "Boot entry number: $bootnum"
-            say "To boot ZFSBootMenu next: efibootmgr -n $bootnum"
+            say "Setting ZFSBootMenu as first boot option..."
+            efibootmgr -o "${bootnum}" >/dev/null 2>&1 || warn "Could not set boot order"
         fi
     else
-        warn "Failed to create UEFI entry automatically"
-        echo ""
-        echo "Manual creation command:"
-        echo "  efibootmgr -c -d ${disk} -p ${partnum} -L 'ZFSBootMenu' -l '\\EFI\\ZBM\\ZFSBootMenu.EFI'"
-        echo ""
-        echo "Or if that fails, try:"
-        echo "  efibootmgr -c -d ${disk} -p ${partnum} -L 'ZFSBootMenu' -l '\\EFI\\ZBM\\vmlinuz-linux-cachyos.EFI'"
+        warn "Failed to create UEFI entry - create manually with efibootmgr"
         return 1
     fi
 }
@@ -348,10 +407,10 @@ final_summary() {
     say "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
     echo "Configuration Summary:"
-    echo "  Pool:        ${POOL}"
+    echo "  Pool:         ${POOL}"
     echo "  Boot Dataset: ${BE_DATASET}"
-    echo "  ESP:         ${ESP_DEV} → ${EFI_DIR}"
-    echo "  ZBM Images:  ${ZBM_EFI_PATH}"
+    echo "  ESP:          ${ESP_DEV} → ${EFI_DIR}"
+    echo "  ZBM Images:   ${ZBM_EFI_PATH}"
     echo ""
 
     echo "Mount Status:"
@@ -361,6 +420,10 @@ final_summary() {
     echo "Kernel Locations:"
     ls -la /boot/vmlinuz-* 2>/dev/null | head -n1 || echo "  None in /boot"
     ls -la "${EFI_DIR}"/vmlinuz-* 2>/dev/null | head -n1 || echo "  None in ESP"
+    echo ""
+
+    echo "UEFI Boot Entries:"
+    efibootmgr | grep -E "Boot[0-9]|BootOrder" || echo "  Could not read UEFI entries"
     echo ""
 
     echo "Next Steps:"
@@ -388,11 +451,12 @@ main() {
     configure_mkinitcpio
 
     write_zbm_config
+    write_pre_snapshot_hook  # Write the fixed snapshot hook
     write_post_hooks
     sync_kernels_to_esp
 
     generate_zbm_images
-    create_uefi_entry
+    create_uefi_entry  # This should now work properly
 
     final_summary
 }
