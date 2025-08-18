@@ -129,8 +129,17 @@ maybe_persist_esp_mount() {
     say "Persisting ESP mount in /etc/fstab at ${EFI_DIR}…"
     local uuid
     uuid="$(blkid -s UUID -o value "${ESP_DEV}")"
-    grep -q "${uuid}.*${EFI_DIR}" /etc/fstab 2>/dev/null || \
+    if ! grep -q "${uuid}.*${EFI_DIR}" /etc/fstab 2>/dev/null; then
       printf "UUID=%s  %s  vfat  umask=0077  0  2\n" "${uuid}" "${EFI_DIR}" >> /etc/fstab
+      say "Added ESP entry to /etc/fstab"
+    fi
+
+    if grep -q "UUID=${uuid}.*[[:space:]]/boot[[:space:]]" /etc/fstab 2>/dev/null ||
+       grep -q "${ESP_DEV}.*[[:space:]]/boot[[:space:]]" /etc/fstab 2>/dev/null; then
+      say "Commenting out /boot entry for ESP device in /etc/fstab"
+      sed -i -e "/UUID=${uuid}.*[[:space:]]\\/boot[[:space:]]/s/^/#/" \
+             -e "\\|${ESP_DEV}.*[[:space:]]/boot[[:space:]]|s/^/#/" /etc/fstab
+    fi
   else
     say "Not persisting ESP in fstab (ZBM mounts it on demand)."
   fi
