@@ -5,22 +5,50 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-USER_HOME="/home/$SUDO_USER"
+
+# Early privilege and user detection (before any SUDO_USER references)
+require_root() { [[ $EUID -eq 0 ]] || die "Run as root (sudo ./install.sh)"; }
+
+# Utility functions (defined early for require_root)
+say() { printf "\033[1;32m[install]\033[0m %s\n" "$*"; }
+warn() { printf "\033[1;33m[install]\033[0m %s\n" "$*"; }
+die() { printf "\033[1;31m[install]\033[0m %s\n" "$*" >&2; exit 1; }
+
+# Ensure running as root first
+require_root
+
+# Safe SUDO_USER defaulting (prevents unbound variable error)
+: "${SUDO_USER:=}"
+
+# Determine installation user with precedence: SUDO_USER -> TARGET_USER -> error
+if [[ -n "$SUDO_USER" && "$SUDO_USER" != "root" ]]; then
+    # Standard sudo execution - use the invoking user
+    INSTALL_USER="$SUDO_USER"
+elif [[ -n "${TARGET_USER:-}" ]]; then
+    # Advanced usage: TARGET_USER specified (for direct root execution)
+    if getent passwd "$TARGET_USER" >/dev/null 2>&1; then
+        INSTALL_USER="$TARGET_USER"
+        warn "Using TARGET_USER=$TARGET_USER (advanced usage)"
+    else
+        die "TARGET_USER '$TARGET_USER' does not exist"
+    fi
+else
+    # Neither sudo nor TARGET_USER - provide clear guidance
+    die "Must run via sudo or set TARGET_USER. Please re-run via: sudo ./install.sh"
+fi
+
+# Resolve user home directory correctly (handles non-standard paths)
+INSTALL_HOME="$(getent passwd "$INSTALL_USER" | cut -d: -f6)"
 
 # Configuration defaults
 : "${USE_SYSTEMD_BOOT_FALLBACK:=true}"
 : "${SNAPSHOT_KEEP:=20}"
 : "${KERNEL_BASENAME:=linux-cachyos}"
 
-# Shared hook helpers
+# Shared hook helpers (loaded after user validation)
 source "$SCRIPT_DIR/system-scripts/hooks-common.sh"
 
 echo "=== CachyOS ZFS Setup Installation ==="
-
-# Utility functions
-say() { printf "\033[1;32m[install]\033[0m %s\n" "$*"; }
-warn() { printf "\033[1;33m[install]\033[0m %s\n" "$*"; }
-die() { printf "\033[1;31m[install]\033[0m %s\n" "$*" >&2; exit 1; }
 
 # Unified kernel management function
 ensure_kernels() {
@@ -78,12 +106,12 @@ cleanup_unbootable_snapshots() {
 install_fish_config() {
     say "Installing Fish shell configuration..."
 
-    local fish_config_dir="$USER_HOME/.config/fish"
-    sudo -u "$SUDO_USER" mkdir -p "$fish_config_dir/functions" "$fish_config_dir/conf.d"
+    local fish_config_dir="$INSTALL_HOME/.config/fish"
+    sudo -u "$INSTALL_USER" mkdir -p "$fish_config_dir/functions" "$fish_config_dir/conf.d"
 
     # Copy only ZFS functions and conf.d snippets
-    sudo -u "$SUDO_USER" cp "$SCRIPT_DIR/fish-shell/functions/zfs-"*.fish "$fish_config_dir/functions/"
-    sudo -u "$SUDO_USER" cp "$SCRIPT_DIR/fish-shell/conf.d/"*.fish "$fish_config_dir/conf.d/"
+    sudo -u "$INSTALL_USER" cp "$SCRIPT_DIR/fish-shell/functions/zfs-"*.fish "$fish_config_dir/functions/"
+    sudo -u "$INSTALL_USER" cp "$SCRIPT_DIR/fish-shell/conf.d/"*.fish "$fish_config_dir/conf.d/"
 
     say "✓ Fish configuration installed"
 }
@@ -130,9 +158,9 @@ enable_zfs_automation() {
 set_fish_default() {
     say "Setting Fish as default shell..."
 
-    if [[ "$SUDO_USER" != "root" ]] && ! grep -q "/usr/bin/fish" /etc/passwd | grep "$SUDO_USER"; then
-        chsh -s /usr/bin/fish "$SUDO_USER" && \
-            say "✓ Fish set as default shell for $SUDO_USER" || \
+    if [[ "$INSTALL_USER" != "root" ]] && ! grep -q "/usr/bin/fish" /etc/passwd | grep "$INSTALL_USER"; then
+        chsh -s /usr/bin/fish "$INSTALL_USER" && \
+            say "✓ Fish set as default shell for $INSTALL_USER" || \
             warn "Could not set Fish as default shell"
     else
         say "✓ Fish already default or user is root"
@@ -140,11 +168,7 @@ set_fish_default() {
 }
 
 main() {
-    # Validate environment
-    [[ $EUID -eq 0 ]] || die "Run as root (sudo ./install.sh)"
-    [[ -n "${SUDO_USER:-}" ]] || die "Must use sudo, not direct root"
-
-    # Core installation
+    # Core installation (privilege validation already done at script start)
     install_fish_config
     install_system_scripts
     install_embedded_hooks
