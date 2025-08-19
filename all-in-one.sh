@@ -57,7 +57,7 @@ GIT_TERMINAL_PROMPT=0 git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$WORKD
 cd "$WORKDIR"
 
 # Warn if ESP argument looks suspicious
-./esp-validate "$@"
+./esp-validate --non-interactive "$@"
 
 # Run main installation
 ./install.sh
