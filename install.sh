@@ -103,6 +103,33 @@ cleanup_unbootable_snapshots() {
     [[ $count -gt 0 ]] && say "✓ Removed $count unbootable snapshot(s)" || say "✓ No unbootable snapshots found"
 }
 
+create_baseline_snapshot() {
+    say "Creating baseline snapshot after successful installation..."
+
+    local root_dataset=$(findmnt -no SOURCE / 2>/dev/null || echo "")
+    [[ -z "$root_dataset" ]] && return 0
+
+    # Ensure kernel files are present before creating baseline
+    if [[ ! -f "/boot/vmlinuz-${KERNEL_BASENAME}" ]]; then
+        warn "Kernel files not found in /boot - skipping baseline snapshot"
+        return 0
+    fi
+
+    local stamp="$(date +%Y%m%d-%H%M%S)"
+    local tag="baseline-${stamp}"
+    
+    say "Creating baseline snapshot ${root_dataset}@${tag}..."
+    zfs snapshot "${root_dataset}@${tag}"
+    
+    # Set custom properties to identify this as a baseline snapshot
+    zfs set custom:snapshot_type="baseline" "${root_dataset}@${tag}"
+    zfs set custom:created_by="cachyos-zfs-setup" "${root_dataset}@${tag}"
+    zfs set custom:kernel_version="$(uname -r)" "${root_dataset}@${tag}"
+    zfs set custom:package_count="$(pacman -Q | wc -l)" "${root_dataset}@${tag}"
+    
+    say "✓ Baseline snapshot created: ${root_dataset}@${tag}"
+}
+
 install_fish_config() {
     say "Installing Fish shell configuration..."
 
@@ -175,11 +202,12 @@ main() {
     enable_zfs_automation
     set_fish_default
 
-    # Post-install cleanup if ZBM is configured
-    if [[ -f /etc/zfsbootmenu/config.yaml ]]; then
-        ensure_kernels /boot
-        cleanup_unbootable_snapshots
-    fi
+    # Ensure kernels are available and cleanup any unbootable snapshots
+    ensure_kernels /boot
+    cleanup_unbootable_snapshots
+
+    # Create baseline snapshot after successful installation
+    create_baseline_snapshot
 
     # Summary
     echo ""
