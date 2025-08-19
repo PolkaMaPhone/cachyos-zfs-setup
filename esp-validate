@@ -10,6 +10,7 @@ confirm_or_exit() {
   local reason="$1"
   echo "[esp-validate] WARNING: $reason" >&2
   echo "[esp-validate] Proceeding may leave your system unbootable or cause data loss." >&2
+  echo "[esp-validate] You should abort unless you know exactly what you're doing." >&2
   read -rp "[esp-validate] Type 'yes' to continue or anything else to abort: " resp
   if [[ "$resp" != "yes" ]]; then
     echo "[esp-validate] Aborting at user request." >&2
@@ -34,4 +35,11 @@ fstype=$(lsblk -no FSTYPE "$ESP_DEV" 2>/dev/null || true)
 partlabel=$(lsblk -no PARTLABEL "$ESP_DEV" 2>/dev/null || true)
 if [[ "$fstype" != "vfat" ]] || [[ -n "$partlabel" && ! "$partlabel" =~ [Ee][Ff][Ii] ]]; then
   confirm_or_exit "$ESP_DEV does not appear to be an EFI System Partition (FSTYPE=$fstype PARTLABEL=$partlabel)."
+else
+  echo "[esp-validate] $ESP_DEV looks like a valid EFI System Partition (FSTYPE=$fstype PARTLABEL=$partlabel)." >&2
+  read -rp "[esp-validate] Type 'yes' to continue or anything else to abort: " resp
+  if [[ "$resp" != "yes" ]]; then
+    echo "[esp-validate] Aborting at user request." >&2
+    exit 1
+  fi
 fi
