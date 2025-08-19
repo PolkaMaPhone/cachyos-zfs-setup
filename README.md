@@ -52,12 +52,53 @@ zpool get bootfs <pool>
 ls /boot         # kernel + initramfs or UKI present
 ```
 
-## Fish shortcuts
-Run `exec fish` once, then:
+## Fish Integration
+The installer sets up minimal, per-user Fish shell integration focused solely on ZFS functionality.
+
+### Installed Files
+After running `sudo ./install.sh`, the following files are installed to the user's home directory:
+- `~/.config/fish/functions/zfs-*.fish` - ZFS helper functions (16 functions)
+- `~/.config/fish/conf.d/00-cachyos-zfs-version.fish` - Version information
+- `~/.config/fish/conf.d/20-cachyos-zfs-env.fish` - Environment variable defaults
+- `~/.config/fish/conf.d/30-cachyos-zfs-abbr.fish` - Convenient abbreviations
+
+### Disable Options
+Disable all ZFS helpers:
 ```bash
-zsi             # list snapshots
-zfs-mount-info  # show dataset for /
-ztc             # create test clone from latest snapshot
+set -Ux CACHYOS_ZFS_DISABLE 1
+```
+
+Disable only abbreviations (keep functions and environment):
+```bash
+set -Ux CACHYOS_ZFS_DISABLE_ABBR 1
+```
+
+### Available Abbreviations  
+Run `exec fish` once, then use these shortcuts:
+```bash
+zls             # zfs-list-snapshots
+zsi             # zfs-list-snapshots (alias)
+zcs             # zfs-config-show
+ztc             # zfs-be-test-clone
+zbi             # zfs-be-info --all
+zspace          # zfs-space
+zfs-mount-info  # findmnt -no SOURCE /
+```
+
+### Environment Variables
+The following ZFS environment variables are set automatically (only if not already defined):
+- `ZFS_ROOT_POOL` (default: "zpcachyos")
+- `ZFS_ROOT_DATASET` (default: "zpcachyos/ROOT/cos/root")
+- `ZFS_HOME_DATASET` (default: "zpcachyos/ROOT/cos/home")
+- `ZFS_VARCACHE_DATASET` (default: "zpcachyos/ROOT/cos/varcache")
+- `ZFS_VARLOG_DATASET` (default: "zpcachyos/ROOT/cos/varlog")
+- `ZFS_BE_ROOT` (default: "zpcachyos/ROOT")
+- `ZFS_SHOW_COMMANDS` (default: true)
+
+### Version Information
+Check the installed version:
+```bash
+echo $CACHYOS_ZFS_HELPERS_VERSION  # Shows: 1.0.0
 ```
 
 ## Uninstall

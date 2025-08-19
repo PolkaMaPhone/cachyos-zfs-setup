@@ -79,11 +79,11 @@ install_fish_config() {
     say "Installing Fish shell configuration..."
 
     local fish_config_dir="$USER_HOME/.config/fish"
-    sudo -u "$SUDO_USER" mkdir -p "$fish_config_dir/functions"
+    sudo -u "$SUDO_USER" mkdir -p "$fish_config_dir/functions" "$fish_config_dir/conf.d"
 
-    # Copy fish config and functions
-    sudo -u "$SUDO_USER" cp "$SCRIPT_DIR/fish-shell/config.fish" "$fish_config_dir/"
-    sudo -u "$SUDO_USER" cp "$SCRIPT_DIR/fish-shell/functions/"*.fish "$fish_config_dir/functions/"
+    # Copy only ZFS functions and conf.d snippets
+    sudo -u "$SUDO_USER" cp "$SCRIPT_DIR/fish-shell/functions/zfs-"*.fish "$fish_config_dir/functions/"
+    sudo -u "$SUDO_USER" cp "$SCRIPT_DIR/fish-shell/conf.d/"*.fish "$fish_config_dir/conf.d/"
 
     say "✓ Fish configuration installed"
 }
