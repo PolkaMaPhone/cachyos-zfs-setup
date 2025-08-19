@@ -1,14 +1,44 @@
 #!/usr/bin/env bash
 # esp-validate - basic sanity checks for ESP device input
-# Usage: esp-validate [/dev/sdXn]
+# Usage: esp-validate [--non-interactive] [/dev/sdXn]
+#
+# Options:
+#   --non-interactive  Skip confirmation prompts for automated scripts
 
 set -euo pipefail
 
-ESP_DEV="${1:-}"
+NON_INTERACTIVE=false
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --non-interactive)
+      NON_INTERACTIVE=true
+      shift
+      ;;
+    -*)
+      echo "[esp-validate] Unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      ESP_DEV="$1"
+      shift
+      ;;
+  esac
+done
+
+ESP_DEV="${ESP_DEV:-}"
 
 confirm_or_exit() {
   local reason="$1"
   echo "[esp-validate] WARNING: $reason" >&2
+  
+  if [[ "$NON_INTERACTIVE" == "true" ]]; then
+    echo "[esp-validate] Non-interactive mode: proceeding despite warning." >&2
+    echo "[esp-validate] Proceeding may leave your system unbootable or cause data loss." >&2
+    return 0
+  fi
+  
   echo "[esp-validate] Proceeding may leave your system unbootable or cause data loss." >&2
   echo "[esp-validate] You should abort unless you know exactly what you're doing." >&2
   read -rp "[esp-validate] Type 'yes' to continue or anything else to abort: " resp
@@ -37,9 +67,14 @@ if [[ "$fstype" != "vfat" ]] || [[ -n "$partlabel" && ! "$partlabel" =~ [Ee][Ff]
   confirm_or_exit "$ESP_DEV does not appear to be an EFI System Partition (FSTYPE=$fstype PARTLABEL=$partlabel)."
 else
   echo "[esp-validate] $ESP_DEV looks like a valid EFI System Partition (FSTYPE=$fstype PARTLABEL=$partlabel)." >&2
-  read -rp "[esp-validate] Type 'yes' to continue or anything else to abort: " resp
-  if [[ "$resp" != "yes" ]]; then
-    echo "[esp-validate] Aborting at user request." >&2
-    exit 1
+  
+  if [[ "$NON_INTERACTIVE" == "true" ]]; then
+    echo "[esp-validate] Non-interactive mode: proceeding with valid ESP device." >&2
+  else
+    read -rp "[esp-validate] Type 'yes' to continue or anything else to abort: " resp
+    if [[ "$resp" != "yes" ]]; then
+      echo "[esp-validate] Aborting at user request." >&2
+      exit 1
+    fi
   fi
 fi
