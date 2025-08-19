@@ -1,5 +1,5 @@
 function zfs-cleanup --description 'Clean up test and temporary ZFS datasets'
-    set -l options 'h/help' 't/test-be' 's/test-snapshots' 'm/manual-snapshots' 'u/unbootable' 'o/old=' 'f/force' 'n/dry-run' 'q/quiet'
+    set -l options 'h/help' 't/test-be' 's/test-snapshots' 'm/manual-snapshots' 'b/baseline-snapshots' 'u/unbootable' 'o/old=' 'f/force' 'n/dry-run' 'q/quiet'
     argparse $options -- $argv
     or return
 
@@ -8,6 +8,7 @@ function zfs-cleanup --description 'Clean up test and temporary ZFS datasets'
         echo "  -t/--test-be         Clean up test boot environments (test-*)"
         echo "  -s/--test-snapshots  Clean up test snapshots (@test-*)"
         echo "  -m/--manual-snapshots Clean up manual snapshots (@manual-*)"
+        echo "  -b/--baseline-snapshots Clean up baseline snapshots (@baseline-*)"
         echo "  -u/--unbootable      Scan for unbootable pacman snapshots"
         echo "  -o/--old DAYS        Clean up snapshots older than N days (not implemented)"
         echo "  -f/--force           Skip confirmation prompts"
@@ -19,9 +20,9 @@ function zfs-cleanup --description 'Clean up test and temporary ZFS datasets'
         return
     end
 
-    if not set -q _flag_test_be; and not set -q _flag_test_snapshots; and not set -q _flag_manual_snapshots; and not set -q _flag_unbootable; and not set -q _flag_old
+    if not set -q _flag_test_be; and not set -q _flag_test_snapshots; and not set -q _flag_manual_snapshots; and not set -q _flag_baseline_snapshots; and not set -q _flag_unbootable; and not set -q _flag_old
         echo "Error: No cleanup type specified. Use -h for help."
-        echo "Available cleanup types: -t (test BEs), -s (test snapshots), -m (manual snapshots), -u (unbootable snapshots)"
+        echo "Available cleanup types: -t (test BEs), -s (test snapshots), -m (manual snapshots), -b (baseline snapshots), -u (unbootable snapshots)"
         return 1
     end
 
@@ -46,6 +47,10 @@ function zfs-cleanup --description 'Clean up test and temporary ZFS datasets'
     else if set -q _flag_manual_snapshots
         set items_to_delete (zfs list -t snapshot -H -o name | grep '@manual-')
         set description "manual snapshots"
+        set destroy_cmd_base "sudo zfs destroy"
+    else if set -q _flag_baseline_snapshots
+        set items_to_delete (zfs list -t snapshot -H -o name | grep '@baseline-')
+        set description "baseline snapshots"
         set destroy_cmd_base "sudo zfs destroy"
     else if set -q _flag_unbootable
         echo "Scanning for unbootable snapshots..."

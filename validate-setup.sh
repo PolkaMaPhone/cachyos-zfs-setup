@@ -212,6 +212,19 @@ check_snapshots() {
     [[ -z "$root_dataset" ]] && return 1
 
     local snap_count=$(zfs list -t snapshot -H -o name -r "$root_dataset" 2>/dev/null | grep "@pacman-" | wc -l)
+    local baseline_count=$(zfs list -t snapshot -H -o name -r "$root_dataset" 2>/dev/null | grep "@baseline-" | wc -l)
+
+    if [[ $baseline_count -gt 0 ]]; then
+        pass "Baseline snapshots found: $baseline_count"
+        
+        # Show most recent baseline
+        local recent_baseline=$(zfs list -t snapshot -H -o name,creation -r "$root_dataset" | grep "@baseline-" | tail -n1)
+        if [[ -n "$recent_baseline" ]]; then
+            echo "    Most recent baseline: $recent_baseline"
+        fi
+    else
+        warn "No baseline snapshots found (should be created during installation)"
+    fi
 
     if [[ $snap_count -gt 0 ]]; then
         pass "Pacman snapshots found: $snap_count"
@@ -219,7 +232,7 @@ check_snapshots() {
         # Show most recent
         local recent=$(zfs list -t snapshot -H -o name,creation -r "$root_dataset" | grep "@pacman-" | tail -n1)
         if [[ -n "$recent" ]]; then
-            echo "    Most recent: $recent"
+            echo "    Most recent pacman: $recent"
         fi
     else
         warn "No pacman snapshots found yet (will be created on next package operation)"
