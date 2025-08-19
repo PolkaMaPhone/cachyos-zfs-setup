@@ -9,6 +9,58 @@ Opinionated ZFS setup for CachyOS providing ZFSBootMenu boot environments, autom
 - Fish shell helpers
 - Optional systemd-boot fallback
 
+## Fish Shell Integration
+
+The installer provides per-user Fish shell integration through conf.d snippets and ZFS helper functions.
+
+### What Gets Installed
+- **Functions**: Only `zfs-*` functions are copied to `~/.config/fish/functions/`
+- **Configuration**: Environment variables and abbreviations via `~/.config/fish/conf.d/` snippets
+- **Version**: `CACHYOS_ZFS_HELPERS_VERSION` environment variable for version tracking
+
+### Configuration Details
+Three conf.d snippets provide the integration:
+- `00-cachyos-zfs-version.fish` - Sets version info and handles disable flags
+- `20-cachyos-zfs-env.fish` - ZFS environment variables (only if not already set)
+- `30-cachyos-zfs-abbr.fish` - ZFS command abbreviations
+
+### Environment Variables
+Default values set only if not already defined:
+```fish
+ZFS_ROOT_POOL="zpcachyos"
+ZFS_ROOT_DATASET="zpcachyos/ROOT/cos/root"  
+ZFS_HOME_DATASET="zpcachyos/ROOT/cos/home"
+ZFS_VARCACHE_DATASET="zpcachyos/ROOT/cos/varcache"
+ZFS_VARLOG_DATASET="zpcachyos/ROOT/cos/varlog"
+ZFS_BE_ROOT="zpcachyos/ROOT"
+ZFS_SHOW_COMMANDS=true
+```
+
+### Available Abbreviations
+```fish
+zls    -> zfs-list-snapshots
+zsi    -> zfs-list-snapshots  
+zcs    -> zfs-config-show
+ztc    -> zfs-be-test-clone
+zbi    -> zfs-be-info --all
+zspace -> zfs-space
+zfs-mount-info -> findmnt -no SOURCE /
+```
+
+### Disabling Helpers
+To disable all ZFS helpers:
+```fish
+set -gx CACHYOS_ZFS_DISABLE 1
+```
+
+To disable only abbreviations:
+```fish
+set -gx CACHYOS_ZFS_DISABLE_ABBR 1
+```
+
+### User's config.fish Untouched
+The installer never modifies your `~/.config/fish/config.fish` file. All integration is done through functions and conf.d snippets that Fish loads automatically.
+
 ## Assumptions
 - CachyOS with systemd-boot
 - Root filesystem on ZFS
@@ -52,12 +104,19 @@ zpool get bootfs <pool>
 ls /boot         # kernel + initramfs or UKI present
 ```
 
-## Fish shortcuts
-Run `exec fish` once, then:
-```bash
-zsi             # list snapshots
-zfs-mount-info  # show dataset for /
-ztc             # create test clone from latest snapshot
+## Quick Fish Usage
+After installation, start a new Fish session and use the abbreviations:
+```fish
+zsi             # list snapshots (zfs-list-snapshots)
+zfs-mount-info  # show dataset for / (findmnt -no SOURCE /)
+ztc             # create test clone from latest snapshot (zfs-be-test-clone)
+zcs             # show ZFS configuration (zfs-config-show)
+zspace          # ZFS space analysis (zfs-space)
+```
+
+Check integration status:
+```fish
+echo $CACHYOS_ZFS_HELPERS_VERSION  # Should show "1.0.0"
 ```
 
 ## Uninstall
