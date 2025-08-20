@@ -29,22 +29,31 @@ done
 
 ESP_DEV="${ESP_DEV:-}"
 
-confirm_or_exit() {
+fail_or_confirm() {
   local reason="$1"
-  echo "[esp-validate] WARNING: $reason" >&2
+  local is_validation_failure="${2:-true}"  # Default to true for validation failures
   
-  if [[ "$NON_INTERACTIVE" == "true" ]]; then
-    echo "[esp-validate] Non-interactive mode: proceeding despite warning." >&2
-    echo "[esp-validate] Proceeding may leave your system unbootable or cause data loss." >&2
-    return 0
-  fi
-  
-  echo "[esp-validate] Proceeding may leave your system unbootable or cause data loss." >&2
-  echo "[esp-validate] You should abort unless you know exactly what you're doing." >&2
-  read -rp "[esp-validate] Type 'yes' to continue or anything else to abort: " resp
-  if [[ "$resp" != "yes" ]]; then
-    echo "[esp-validate] Aborting at user request." >&2
+  if [[ "$is_validation_failure" == "true" ]]; then
+    # This is a validation failure - always exit regardless of interactive mode
+    echo "[esp-validate] ERROR: $reason" >&2
+    echo "[esp-validate] Cannot proceed with invalid ESP device." >&2
     exit 1
+  else
+    # This is just a confirmation prompt for a valid device
+    echo "[esp-validate] WARNING: $reason" >&2
+    
+    if [[ "$NON_INTERACTIVE" == "true" ]]; then
+      echo "[esp-validate] Non-interactive mode: proceeding with confirmation." >&2
+      return 0
+    fi
+    
+    echo "[esp-validate] Proceeding may leave your system unbootable or cause data loss." >&2
+    echo "[esp-validate] You should abort unless you know exactly what you're doing." >&2
+    read -rp "[esp-validate] Type 'yes' to continue or anything else to abort: " resp
+    if [[ "$resp" != "yes" ]]; then
+      echo "[esp-validate] Aborting at user request." >&2
+      exit 1
+    fi
   fi
 }
 
@@ -54,17 +63,17 @@ if [[ -z "$ESP_DEV" ]]; then
 fi
 
 if [[ ! -e "$ESP_DEV" ]]; then
-  confirm_or_exit "$ESP_DEV does not exist."
+  fail_or_confirm "$ESP_DEV does not exist." true
 fi
 
 if [[ ! -b "$ESP_DEV" ]]; then
-  confirm_or_exit "$ESP_DEV is not a block device."
+  fail_or_confirm "$ESP_DEV is not a block device." true
 fi
 
 fstype=$(lsblk -no FSTYPE "$ESP_DEV" 2>/dev/null || true)
 partlabel=$(lsblk -no PARTLABEL "$ESP_DEV" 2>/dev/null || true)
 if [[ "$fstype" != "vfat" ]] || [[ -n "$partlabel" && ! "$partlabel" =~ [Ee][Ff][Ii] ]]; then
-  confirm_or_exit "$ESP_DEV does not appear to be an EFI System Partition (FSTYPE=$fstype PARTLABEL=$partlabel)."
+  fail_or_confirm "$ESP_DEV does not appear to be an EFI System Partition (FSTYPE=$fstype PARTLABEL=$partlabel)." true
 else
   echo "[esp-validate] $ESP_DEV looks like a valid EFI System Partition (FSTYPE=$fstype PARTLABEL=$partlabel)." >&2
   
