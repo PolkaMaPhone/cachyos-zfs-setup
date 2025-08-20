@@ -245,6 +245,7 @@ check_pacman_hooks() {
         "00-zfs-pre-snapshot.hook"
         "99-zfs-prune-snapshots.hook"
         "90-generate-zbm.hook"
+        "10-copy-kernel-to-esp.hook"
     )
 
     local found=0
@@ -256,6 +257,16 @@ check_pacman_hooks() {
 
     if [[ $found -eq ${#expected_hooks[@]} ]]; then
         pass "All pacman hooks installed ($found/${#expected_hooks[@]})"
+        
+        # Check if copy-kernel hook includes microcode triggers
+        local copy_hook="$hooks_dir/10-copy-kernel-to-esp.hook"
+        if [[ -f "$copy_hook" ]]; then
+            if grep -q "amd-ucode\|intel-ucode" "$copy_hook" 2>/dev/null; then
+                pass "Copy-kernel hook includes microcode package triggers"
+            else
+                warn "Copy-kernel hook missing microcode package triggers"
+            fi
+        fi
     else
         warn "Some pacman hooks missing ($found/${#expected_hooks[@]} found)"
     fi
@@ -265,6 +276,7 @@ check_helper_scripts() {
     local scripts=(
         "/usr/local/sbin/zfs-pre-pacman-snapshot.sh"
         "/usr/local/sbin/zfs-prune-pacman-snapshots.sh"
+        "/usr/local/sbin/copy-kernel-to-esp.sh"
     )
 
     local found=0
@@ -320,6 +332,68 @@ check_kernel_locations() {
     fi
 
     return $status
+}
+
+check_microcode_locations() {
+    local esp_path="${1:-/efi}"
+    local boot_amd="/boot/amd-ucode.img"
+    local boot_intel="/boot/intel-ucode.img"
+    local esp_amd="$esp_path/amd-ucode.img"
+    local esp_intel="$esp_path/intel-ucode.img"
+
+    # Check if microcode packages are installed
+    local amd_installed=false
+    local intel_installed=false
+    
+    if command -v pacman >/dev/null 2>&1; then
+        if pacman -Q amd-ucode >/dev/null 2>&1; then
+            amd_installed=true
+        fi
+        if pacman -Q intel-ucode >/dev/null 2>&1 || pacman -Q linux-firmware-intel >/dev/null 2>&1; then
+            intel_installed=true
+        fi
+    fi
+
+    local microcode_found=0
+
+    # Check AMD microcode
+    if [[ "$amd_installed" == "true" ]]; then
+        if [[ -f "$boot_amd" ]]; then
+            pass "AMD microcode in /boot"
+            ((microcode_found++))
+        else
+            warn "AMD microcode package installed but file missing from /boot"
+        fi
+
+        if [[ -n "$esp_path" ]] && [[ -f "$esp_amd" ]]; then
+            pass "AMD microcode in ESP"
+        elif [[ "$amd_installed" == "true" ]]; then
+            warn "AMD microcode missing from ESP (may cause boot issues)"
+        fi
+    fi
+
+    # Check Intel microcode
+    if [[ "$intel_installed" == "true" ]]; then
+        if [[ -f "$boot_intel" ]]; then
+            pass "Intel microcode in /boot"
+            ((microcode_found++))
+        else
+            warn "Intel microcode package installed but file missing from /boot"
+        fi
+
+        if [[ -n "$esp_path" ]] && [[ -f "$esp_intel" ]]; then
+            pass "Intel microcode in ESP"
+        elif [[ "$intel_installed" == "true" ]]; then
+            warn "Intel microcode missing from ESP (may cause boot issues)"
+        fi
+    fi
+
+    # Summary for when no microcode packages are installed
+    if [[ "$amd_installed" == "false" ]] && [[ "$intel_installed" == "false" ]]; then
+        warn "No microcode packages installed (consider: amd-ucode or intel-ucode)"
+    elif [[ $microcode_found -eq 0 ]]; then
+        warn "Microcode packages installed but no microcode files found in /boot"
+    fi
 }
 
 # Fish shell checks
@@ -382,6 +456,7 @@ main() {
 
     header "Kernel Locations"
     check_kernel_locations "${ESP_PATH:-/efi}"
+    check_microcode_locations "${ESP_PATH:-/efi}"
 
     header "Snapshots & Automation"
     check_snapshots "$ROOT_DATASET"

@@ -174,11 +174,14 @@ Operation = Install
 Operation = Upgrade
 Type = Package
 Target = ${KERNEL_BASENAME}
+Target = amd-ucode
+Target = intel-ucode
+Target = linux-firmware-intel
 
 [Action]
 When = PostTransaction
-  Exec = /usr/bin/env ESP_DEV=${ESP_DEV:-} /usr/local/sbin/copy-kernel-to-esp.sh
-Description = Mirror kernel/initramfs to ESP and ensure in /boot
+Exec = /usr/bin/env ESP_DEV=${ESP_DEV:-} /usr/local/sbin/copy-kernel-to-esp.sh
+Description = Mirror kernel/initramfs/microcode to ESP and ensure in /boot
 EOF
 }
 

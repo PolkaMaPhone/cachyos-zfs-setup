@@ -74,6 +74,17 @@ ensure_kernels() {
     # Fall back to package installation
     say "Installing kernel package to populate $target..."
     pacman -S --noconfirm "${KERNEL_BASENAME}"
+    
+    # Also ensure microcode packages are available if processor is detected
+    if grep -q "vendor_id.*AuthenticAMD" /proc/cpuinfo 2>/dev/null; then
+        say "AMD processor detected, ensuring amd-ucode is installed..."
+        pacman -S --noconfirm amd-ucode 2>/dev/null || warn "Failed to install amd-ucode package"
+    fi
+    if grep -q "vendor_id.*GenuineIntel" /proc/cpuinfo 2>/dev/null; then
+        say "Intel processor detected, ensuring intel-ucode is installed..."
+        pacman -S --noconfirm intel-ucode 2>/dev/null || pacman -S --noconfirm linux-firmware-intel 2>/dev/null || warn "Failed to install Intel microcode package"
+    fi
+    
     say "✓ Kernel package installed"
 }
 
