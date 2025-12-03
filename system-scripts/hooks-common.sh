@@ -145,30 +145,35 @@ else
 fi
 
 mkdir -p "\$ESP"
-mounted_before=false
+mounted_now=false
 
 if ! findmnt -no FSTYPE "\$ESP" 2>/dev/null | grep -qx 'vfat'; then
   if [[ -n "\$ESP_DEV" ]]; then
     echo "[copy-kernel] Mounting \$ESP_DEV at \$ESP"
     mount -t vfat "\$ESP_DEV" "\$ESP" || { echo "[copy-kernel] mount failed"; exit 0; }
-    mounted_before=true
+    mounted_now=true
   else
     echo "[copy-kernel] \$ESP not mounted and ESP_DEV not set; skipping."
     exit 0
   fi
+else
+    echo "[copy-kernel] ESP already mounted at \$ESP"
 fi
 
-[[ -f "\$K" ]] && install -m0644 "\$K" "\$ESP/"
-[[ -f "\$I" ]] && install -m0644 "\$I" "\$ESP/"
-[[ -f /boot/amd-ucode.img   ]] && install -m0644 /boot/amd-ucode.img   "\$ESP/"
-[[ -f /boot/intel-ucode.img ]] && install -m0644 /boot/intel-ucode.img "\$ESP/"
+[[ -f "\$K" ]] && install -m0644 "\$K" "\$ESP/"    && echo "[copy-kernel] copied \$K -> \$ESP/"
+[[ -f "\$I" ]] && install -m0644 "\$I" "\$ESP/"    && echo "[copy-kernel] copied \$I -> \$ESP/"
+[[ -f /boot/amd-ucode.img   ]] && install -m0644 /boot/amd-ucode.img   "\$ESP/"    && echo "[copy-kernel] copied amd-ucode"
+[[ -f /boot/intel-ucode.img ]] && install -m0644 /boot/intel-ucode.img "\$ESP/"    && echo "[copy-kernel] copied intel-ucode"
 
-\$mounted_before && umount "\$ESP" || true
+sync
+if [[ "\$mounted_now" = true ]]; then
+    echo "[copy-kernel] Note: ESP was mounted by this hook; leaving it mounted so later hooks can use it."
+fi
 exit 0
 EOF
     chmod +x /usr/local/sbin/copy-kernel-to-esp.sh
 
-    cat >/etc/pacman.d/hooks/10-copy-kernel-to-esp.hook <<EOF
+    cat >/etc/pacman.d/hooks/95-copy-kernel-to-esp.hook <<EOF
 [Trigger]
 Operation = Install
 Operation = Upgrade
